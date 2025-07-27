@@ -1,0 +1,39 @@
+# 构建目录
+build/
+cmake-build-*/
+out/
+bin/
+
+# 编译产物
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.a
+*.lib
+
+# 编辑器和IDE文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# SQLite数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# 日志文件
+*.log
+
+# CMake相关
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+compile_commands.json
+
+# 测试相关
+test.db
