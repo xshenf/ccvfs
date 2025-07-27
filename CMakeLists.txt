@@ -1,81 +1,65 @@
 cmake_minimum_required(VERSION 3.10)
-project(compressvfs C)
+project(sqlitecc C)
 
 set(CMAKE_C_STANDARD 99)
 
-# 设置包含目录
-include_directories(include)
-include_directories(sqlite3)
-
-# 查找SQLite3库
-find_package(SQLite3)
-
 # 添加编译选项
-option(ENABLE_DEBUG "Enable debug mode" OFF)
-option(ENABLE_VERBOSE "Enable verbose mode" OFF)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DSQLITE_ENABLE_FTS5")
+
+# 添加调试和详细输出选项
+option(ENABLE_DEBUG "Enable debug output" OFF)
+option(ENABLE_VERBOSE "Enable verbose output" OFF)
 
 if(ENABLE_DEBUG)
-    add_compile_definitions(DEBUG)
+    add_definitions(-DDEBUG)
 endif()
 
 if(ENABLE_VERBOSE)
-    add_compile_definitions(VERBOSE)
+    add_definitions(-DVERBOSE)
 endif()
 
-# 创建共享库
-add_library(compressvfs SHARED
-    src/compress_vfs.c
-)
+# 包含目录
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sqlite3)
 
-# 链接SQLite3库
-if(SQLite3_FOUND)
-    target_link_libraries(compressvfs SQLite::SQLite3)
-else()
-    # 如果找不到系统SQLite3库，则使用内置的
-    target_sources(compressvfs PRIVATE sqlite3/sqlite3.c)
-endif()
-
-# 创建测试可执行文件
-add_executable(test_compressvfs
-    test/main.c
-)
-
-# 创建shell可执行文件，包含SQLite源码和我们的VFS代码
-add_executable(sqlite3cc
-    src/shell.c
-    sqlite3/shell.c
+# SQLite3源文件
+set(SQLITE3_SRC 
     sqlite3/sqlite3.c
 )
 
-# 定义shell入口点
-target_compile_definitions(sqlite3cc PRIVATE SQLITE_ENABLE_CEROD=1)
+# 压缩VFS源文件
+set(CCVFS_SRC 
+    src/compress_vfs.c
+)
 
-# 链接库和包含目录
-target_link_libraries(test_compressvfs compressvfs)
+# 主库
+add_library(sqlitecc STATIC ${SQLITE3_SRC} ${CCVFS_SRC})
 
-# 在Windows上可能需要链接额外的库
-if(WIN32)
-    target_link_libraries(sqlite3cc)
-else()
-    if(SQLite3_FOUND)
-        target_link_libraries(sqlite3cc SQLite::SQLite3)
-    else()
-        target_link_libraries(sqlite3cc)
-    endif()
+# 测试程序
+add_executable(test_main test/main.c)
+target_link_libraries(test_main sqlitecc)
+
+# 大型数据库测试程序
+add_executable(large_db_test test/large_db_test.c)
+target_link_libraries(large_db_test sqlitecc)
+
+# 大型数据库测试程序 (UTF-8版本)
+add_executable(large_db_test_utf8 test/large_db_test_utf8.c)
+target_link_libraries(large_db_test_utf8 sqlitecc)
+
+# 大型数据库测试程序 (使用zlib)
+add_executable(large_db_zlib_test test/large_db_zlib_test.c)
+target_link_libraries(large_db_zlib_test sqlitecc)
+
+# Shell程序
+add_executable(shell src/shell.c)
+target_link_libraries(shell sqlitecc)
+
+# 链接数学库（某些平台需要）
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_main m)
+    target_link_libraries(large_db_test m)
+    target_link_libraries(large_db_test_utf8 m)
+    target_link_libraries(large_db_zlib_test m)
+    target_link_libraries(shell m)
 endif()
-
-# 设置输出目录并添加编译选项
-set_target_properties(compressvfs PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
-)
-
-# 添加编译定义以启用新API
-target_compile_definitions(compressvfs PRIVATE -DNEW_API_ENABLED)
-
-set_target_properties(test_compressvfs PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
-set_target_properties(sqlite3cc PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
