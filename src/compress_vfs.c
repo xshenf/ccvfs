@@ -1,15 +1,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 #include "../include/compress_vfs.h"
 
-// 数据块大小定义
-#define CCVFS_DEFAULT_BLOCK_SIZE 8192
-#define CCVFS_HEADER_SIZE 16
-#define CCVFS_LENGTH_FIELD_SIZE 4
-
-
-// Debug macro definition
+// Debug macro definitions
 #ifdef DEBUG
 #define CCVFS_DEBUG(fmt, ...) fprintf(stderr, "[CCVFS DEBUG] %s:%d: " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
 #else
@@ -25,40 +20,43 @@
 #define CCVFS_INFO(fmt, ...) fprintf(stdout, "[CCVFS INFO] " fmt "\n", ##__VA_ARGS__)
 #define CCVFS_ERROR(fmt, ...) fprintf(stderr, "[CCVFS ERROR] %s:%d: " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
 
+// Internal constants
+#define CCVFS_MAX_ALGORITHMS 16
+#define CCVFS_CRC32_POLYNOMIAL 0xEDB88320
 
-// 数据块头部结构
-typedef struct {
-    unsigned int magic;          // 魔数标识
-    unsigned int block_number;   // 块序列号
-    unsigned int checksum;       // 校验和
-    unsigned int flags;          // 标志位
-} CCVFSBlockHeader;
+// Algorithm registry
+static CompressAlgorithm *g_compress_algorithms[CCVFS_MAX_ALGORITHMS];
+static EncryptAlgorithm *g_encrypt_algorithms[CCVFS_MAX_ALGORITHMS];
+static int g_compress_algorithm_count = 0;
+static int g_encrypt_algorithm_count = 0;
+static int g_algorithms_initialized = 0;
 
 /*
- * CCVFS结构体
- * 包含基础VFS结构和一些额外信息
+ * CCVFS structure
  */
 typedef struct CCVFS {
-    sqlite3_vfs base;           /* 基础VFS结构 */
-    sqlite3_vfs *pRootVfs;      /* 底层VFS */
-    char *zCompressType;        /* 压缩算法类型 */
-    char *zEncryptType;         /* 加密算法类型 */
-    CompressAlgorithm *pCompressAlg; /* 压缩算法实现 */
-    EncryptAlgorithm *pEncryptAlg;   /* 加密算法实现 */
+    sqlite3_vfs base;           /* Base VFS structure */
+    sqlite3_vfs *pRootVfs;      /* Underlying VFS */
+    char *zCompressType;        /* Compression algorithm type */
+    char *zEncryptType;         /* Encryption algorithm type */
+    CompressAlgorithm *pCompressAlg; /* Compression algorithm implementation */
+    EncryptAlgorithm *pEncryptAlg;   /* Encryption algorithm implementation */
+    uint32_t creation_flags;    /* Creation flags */
 } CCVFS;
 
 /*
- * CCVFS文件结构体
+ * CCVFS file structure
  */
 typedef struct CCVFSFile {
-    sqlite3_file base;          /* 基础文件结构 */
-    sqlite3_file *pReal;        /* 实际的文件指针 */
-    CCVFS *pOwner;              /* 拥有此文件的VFS */
+    sqlite3_file base;          /* Base file structure */
+    sqlite3_file *pReal;        /* Actual file pointer */
+    CCVFS *pOwner;              /* Owner VFS */
+    CCVFSFileHeader header;     /* Cached file header */
+    CCVFSBlockIndex *pBlockIndex; /* Block index table */
+    int header_loaded;          /* Header loaded flag */
 } CCVFSFile;
 
-/*
- * IO方法声明
- */
+// Forward declarations
 static int ccvfsIoClose(sqlite3_file*);
 static int ccvfsIoRead(sqlite3_file*, void*, int iAmt, sqlite3_int64 iOfst);
 static int ccvfsIoWrite(sqlite3_file*, const void*, int iAmt, sqlite3_int64 iOfst);
@@ -78,8 +76,35 @@ static int ccvfsIoShmUnmap(sqlite3_file*, int deleteFlag);
 static int ccvfsIoFetch(sqlite3_file*, sqlite3_int64 iOfst, int iAmt, void **pp);
 static int ccvfsIoUnfetch(sqlite3_file*, sqlite3_int64 iOfst, void *p);
 
+// VFS method declarations
+static int ccvfsOpen(sqlite3_vfs*, sqlite3_filename zName, sqlite3_file*, int flags, int *pOutFlags);
+static int ccvfsDelete(sqlite3_vfs*, const char *zName, int syncDir);
+static int ccvfsAccess(sqlite3_vfs*, const char *zName, int flags, int *pResOut);
+static int ccvfsFullPathname(sqlite3_vfs*, const char *zName, int nOut, char *zOut);
+static void *ccvfsDlOpen(sqlite3_vfs*, const char *zFilename);
+static void ccvfsDlError(sqlite3_vfs*, int nByte, char *zErrMsg);
+static void *(*ccvfsDlSym(sqlite3_vfs*,void*, const char *zSymbol))(void);
+static void ccvfsDlClose(sqlite3_vfs*, void*);
+static int ccvfsRandomness(sqlite3_vfs*, int nByte, char *zOut);
+static int ccvfsSleep(sqlite3_vfs*, int microseconds);
+static int ccvfsCurrentTime(sqlite3_vfs*, double*);
+static int ccvfsGetLastError(sqlite3_vfs*, int, char *);
+static int ccvfsCurrentTimeInt64(sqlite3_vfs*, sqlite3_int64*);
+static int ccvfsSetSystemCall(sqlite3_vfs*, const char *zName, sqlite3_syscall_ptr);
+static sqlite3_syscall_ptr ccvfsGetSystemCall(sqlite3_vfs*, const char *zName);
+static const char *ccvfsNextSystemCall(sqlite3_vfs*, const char *zName);
+
+// Utility functions
+static uint32_t ccvfs_crc32(const unsigned char *data, int len);
+static int ccvfs_load_header(CCVFSFile *pFile);
+static int ccvfs_save_header(CCVFSFile *pFile);
+static int ccvfs_load_block_index(CCVFSFile *pFile);
+static CompressAlgorithm* ccvfs_find_compress_algorithm(const char *name);
+static EncryptAlgorithm* ccvfs_find_encrypt_algorithm(const char *name);
+static void ccvfs_init_builtin_algorithms(void);
+
 /*
- * IO方法表
+ * IO methods table
  */
 static sqlite3_io_methods ccvfsIoMethods = {
     3,                          /* iVersion */
@@ -103,1029 +128,534 @@ static sqlite3_io_methods ccvfsIoMethods = {
     ccvfsIoUnfetch              /* xUnfetch */
 };
 
-/*
- * VFS方法声明
- */
-static int ccvfsOpen(sqlite3_vfs*, sqlite3_filename zName, sqlite3_file*, int flags, int *pOutFlags);
-static int ccvfsDelete(sqlite3_vfs*, const char *zName, int syncDir);
-static int ccvfsAccess(sqlite3_vfs*, const char *zName, int flags, int *pResOut);
-static int ccvfsFullPathname(sqlite3_vfs*, const char *zName, int nOut, char *zOut);
-static void *ccvfsDlOpen(sqlite3_vfs*, const char *zFilename);
-static void ccvfsDlError(sqlite3_vfs*, int nByte, char *zErrMsg);
-static void *(*ccvfsDlSym(sqlite3_vfs*,void*, const char *zSymbol))(void);
-static void ccvfsDlClose(sqlite3_vfs*, void*);
-static int ccvfsRandomness(sqlite3_vfs*, int nByte, char *zOut);
-static int ccvfsSleep(sqlite3_vfs*, int microseconds);
-static int ccvfsCurrentTime(sqlite3_vfs*, double*);
-static int ccvfsGetLastError(sqlite3_vfs*, int, char *);
-static int ccvfsCurrentTimeInt64(sqlite3_vfs*, sqlite3_int64*);
-static int ccvfsSetSystemCall(sqlite3_vfs*, const char *zName, sqlite3_syscall_ptr);
-static sqlite3_syscall_ptr ccvfsGetSystemCall(sqlite3_vfs*, const char *zName);
-static const char *ccvfsNextSystemCall(sqlite3_vfs*, const char *zName);
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
 
 /*
- * 简单的RLE压缩实现
+ * Calculate CRC32 checksum
  */
-static int rle_compress(const unsigned char *input, int input_len, unsigned char *output, int output_len) {
-    CCVFS_DEBUG("Compressing data: input length=%d, output buffer size=%d", input_len, output_len);
+static uint32_t ccvfs_crc32(const unsigned char *data, int len) {
+    uint32_t crc = 0xFFFFFFFF;
+    int i, j;
     
-    int i, j = 0;
-    int count;
-    
-    if (output_len < input_len) {
-        CCVFS_ERROR("Output buffer too small: %d < %d", output_len, input_len);
-        return -1; // 输出缓冲区太小
+    for (i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (j = 0; j < 8; j++) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ CCVFS_CRC32_POLYNOMIAL;
+            } else {
+                crc >>= 1;
+            }
+        }
     }
     
-    for (i = 0; i < input_len; i++) {
+    return crc ^ 0xFFFFFFFF;
+}
+
+/*
+ * Find compression algorithm by name
+ */
+static CompressAlgorithm* ccvfs_find_compress_algorithm(const char *name) {
+    int i;
+    
+    if (!name) return NULL;
+    
+    for (i = 0; i < g_compress_algorithm_count; i++) {
+        if (g_compress_algorithms[i] && 
+            strcmp(g_compress_algorithms[i]->name, name) == 0) {
+            return g_compress_algorithms[i];
+        }
+    }
+    
+    return NULL;
+}
+
+/*
+ * Find encryption algorithm by name
+ */
+static EncryptAlgorithm* ccvfs_find_encrypt_algorithm(const char *name) {
+    int i;
+    
+    if (!name) return NULL;
+    
+    for (i = 0; i < g_encrypt_algorithm_count; i++) {
+        if (g_encrypt_algorithms[i] && 
+            strcmp(g_encrypt_algorithms[i]->name, name) == 0) {
+            return g_encrypt_algorithms[i];
+        }
+    }
+    
+    return NULL;
+}
+
+// ============================================================================
+// BUILTIN ALGORITHMS
+// ============================================================================
+
+/*
+ * RLE Compression Algorithm (Improved)
+ */
+static int rle_compress(const unsigned char *input, int input_len, 
+                       unsigned char *output, int output_len, int level) {
+    int i = 0, j = 0;
+    int count;
+    
+    CCVFS_DEBUG("RLE compressing %d bytes", input_len);
+    
+    if (output_len < input_len + input_len/2) {
+        CCVFS_ERROR("Output buffer too small for RLE compression");
+        return -1;
+    }
+    
+    while (i < input_len) {
+        unsigned char byte = input[i];
         count = 1;
-        while (i + count < input_len && input[i] == input[i + count] && count < 255) {
+        
+        // Count consecutive identical bytes
+        while (i + count < input_len && input[i + count] == byte && count < 255) {
             count++;
         }
         
-        if (count > 1) {
-            if (j + 2 > output_len) {
-                CCVFS_ERROR("Output buffer too small: j=%d, needed=%d, available=%d", j, j+2, output_len);
-                return -1; // 输出缓冲区太小
-            }
-            output[j++] = input[i];
-            output[j++] = (unsigned char)count;
-            i += count - 1;
-            CCVFS_VERBOSE("Compress repeated character: character=%u, count=%d", input[i], count);
+        if (count >= 3 || (count == 2 && byte == 0)) {
+            // Use RLE encoding for runs of 3+ or runs of 2 zeros
+            if (j + 3 > output_len) return -1;
+            output[j++] = 0xFF;  // RLE marker
+            output[j++] = byte;  // Repeated byte
+            output[j++] = count; // Count
         } else {
-            if (j + 1 > output_len) {
-                CCVFS_ERROR("Output buffer too small: j=%d, needed=%d, available=%d", j, j+1, output_len);
-                return -1; // 输出缓冲区太小
+            // Copy literal bytes
+            if (byte == 0xFF) {
+                // Escape the RLE marker
+                if (j + 2 > output_len) return -1;
+                output[j++] = 0xFF;
+                output[j++] = 0x00;  // Escaped marker
+            } else {
+                if (j + 1 > output_len) return -1;
+                output[j++] = byte;
             }
-            output[j++] = input[i];
-            CCVFS_VERBOSE("Copy single character: character=%u", input[i]);
+            count = 1;
         }
+        
+        i += count;
     }
     
-    CCVFS_DEBUG("Compression completed: original length=%d, compressed length=%d", input_len, j);
-    return j; // 返回压缩后的长度
+    CCVFS_DEBUG("RLE compressed %d bytes to %d bytes", input_len, j);
+    return j;
 }
 
-/*
- * 简单的RLE解压缩实现
- */
-static int rle_decompress(const unsigned char *input, int input_len, unsigned char *output, int output_len) {
-    CCVFS_DEBUG("Decompressing data: input length=%d, output buffer size=%d", input_len, output_len);
+static int rle_decompress(const unsigned char *input, int input_len,
+                         unsigned char *output, int output_len) {
+    int i = 0, j = 0;
     
-    int i, j = 0;
+    CCVFS_DEBUG("RLE decompressing %d bytes", input_len);
     
-    for (i = 0; i < input_len; i++) {
-        unsigned char byte = input[i];
-        
-        if (i + 1 < input_len && j + input[i+1] <= output_len) {
-            // 检查是否是压缩数据（后面跟着计数）
-            int count = input[i+1];
-            if (count > 1) {
-                // 解压重复数据
-                int k;
-                for (k = 0; k < count && j < output_len; k++) {
+    while (i < input_len && j < output_len) {
+        if (input[i] == 0xFF) {
+            if (i + 1 >= input_len) break;
+            
+            if (input[i + 1] == 0x00) {
+                // Escaped marker
+                output[j++] = 0xFF;
+                i += 2;
+            } else if (i + 2 < input_len) {
+                // RLE sequence
+                unsigned char byte = input[i + 1];
+                int count = input[i + 2];
+                
+                if (j + count > output_len) {
+                    CCVFS_ERROR("Output buffer overflow in RLE decompression");
+                    return -1;
+                }
+                
+                while (count-- > 0 && j < output_len) {
                     output[j++] = byte;
                 }
-                i++; // 跳过计数字段
-                CCVFS_VERBOSE("Decompress repeated character: character=%u, count=%d", byte, count);
-                continue;
+                i += 3;
+            } else {
+                break;
             }
+        } else {
+            output[j++] = input[i++];
         }
-        
-        // 单字节数据
-        if (j >= output_len) {
-            CCVFS_ERROR("Output buffer too small: j=%d, needed=%d", j, j+1);
-            return -1; // 输出缓冲区太小
-        }
-        output[j++] = byte;
-        CCVFS_VERBOSE("Copy single character: character=%u", byte);
     }
     
-    CCVFS_DEBUG("Decompression completed: compressed length=%d, decompressed length=%d", input_len, j);
-    return j; // 返回解压后的长度
+    CCVFS_DEBUG("RLE decompressed %d bytes to %d bytes", input_len, j);
+    return j;
+}
+
+static int rle_get_max_compressed_size(int input_len) {
+    // Worst case: every byte needs to be escaped
+    return input_len * 2 + 16;
 }
 
 /*
- * 简单的XOR加密实现
+ * XOR Encryption Algorithm (Simple)
  */
 static int xor_encrypt(const unsigned char *key, int key_len,
                       const unsigned char *input, int input_len,
                       unsigned char *output, int output_len) {
-    CCVFS_DEBUG("XOR encrypting data: key length=%d, input length=%d, output buffer size=%d", key_len, input_len, output_len);
-    
     int i;
     
     if (output_len < input_len) {
-        CCVFS_ERROR("Output buffer too small: %d < %d", output_len, input_len);
-        return -1; // 输出缓冲区太小
+        CCVFS_ERROR("Output buffer too small for XOR encryption");
+        return -1;
+    }
+    
+    if (key_len == 0) {
+        memcpy(output, input, input_len);
+        return input_len;
     }
     
     for (i = 0; i < input_len; i++) {
         output[i] = input[i] ^ key[i % key_len];
-        CCVFS_VERBOSE("Encrypt byte: original=%u, key=%u, encrypted=%u", input[i], key[i % key_len], output[i]);
     }
     
-    CCVFS_DEBUG("XOR encryption completed: bytes processed=%d", input_len);
     return input_len;
 }
 
-/*
- * 简单的XOR解密实现（与加密相同）
- */
 static int xor_decrypt(const unsigned char *key, int key_len,
                       const unsigned char *input, int input_len,
                       unsigned char *output, int output_len) {
-    CCVFS_DEBUG("XOR decrypting data: key length=%d, input length=%d, output buffer size=%d", key_len, input_len, output_len);
-    
-    // XOR解密与加密是相同的操作
-    int result = xor_encrypt(key, key_len, input, input_len, output, output_len);
-    
-    if (result >= 0) {
-        CCVFS_DEBUG("XOR decryption completed: bytes processed=%d", result);
-    } else {
-        CCVFS_ERROR("XOR decryption failed");
-    }
-    
-    return result;
+    // XOR encryption is symmetric
+    return xor_encrypt(key, key_len, input, input_len, output, output_len);
 }
 
+// Builtin algorithm instances
+static CompressAlgorithm rle_algorithm = {
+    "rle",
+    rle_compress,
+    rle_decompress,
+    rle_get_max_compressed_size
+};
+
+static EncryptAlgorithm xor_algorithm = {
+    "xor",
+    xor_encrypt,
+    xor_decrypt,
+    16  // Default key size
+};
+
 /*
- * IO方法实现
+ * Initialize builtin algorithms
  */
-static int ccvfsIoClose(sqlite3_file *pFile) {
-    CCVFS_DEBUG("Closing file");
+static void ccvfs_init_builtin_algorithms(void) {
+    if (g_algorithms_initialized) return;
     
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xClose(p->pReal);
+    // Register builtin compression algorithms
+    sqlite3_ccvfs_register_compress_algorithm(&rle_algorithm);
     
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("File closed successfully");
-    } else {
-        CCVFS_ERROR("Failed to close file: %d", result);
-    }
+    // Register builtin encryption algorithms
+    sqlite3_ccvfs_register_encrypt_algorithm(&xor_algorithm);
     
-    return result;
+    g_algorithms_initialized = 1;
+    
+    CCVFS_INFO("Builtin algorithms initialized");
 }
 
-static int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) {
-    CCVFS_DEBUG("Reading file: length=%d, offset=%lld", iAmt, iOfst);
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    CCVFS *pVfs = p->pOwner;
-    
-    // If no compression or encryption algorithm is set, read directly
-    if (!pVfs->pCompressAlg && !pVfs->pEncryptAlg) {
-        CCVFS_DEBUG("No compression or encryption algorithm, reading directly");
-        int result = p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
-        if (result == SQLITE_OK) {
-            CCVFS_DEBUG("Direct read successful");
-        } else {
-            CCVFS_ERROR("Direct read failed: %d", result);
-        }
-        return result;
-    }
-    
-    // For now, we still call the underlying VFS's read method directly
-    // The real decompression and decryption functionality will be implemented later
-    int result = p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Read successful");
-    } else if (result == SQLITE_IOERR_SHORT_READ) {
-        CCVFS_DEBUG("Partial read completed");
-    } else {
-        CCVFS_ERROR("Read failed: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst) {
-    CCVFS_DEBUG("Writing file: length=%d, offset=%lld", iAmt, iOfst);
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    CCVFS *pVfs = p->pOwner;
-    
-    // If no compression or encryption algorithm is set, write directly
-    if (!pVfs->pCompressAlg && !pVfs->pEncryptAlg) {
-        CCVFS_DEBUG("No compression or encryption algorithm, writing directly");
-        int result = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
-        if (result == SQLITE_OK) {
-            CCVFS_DEBUG("Direct write successful");
-        } else {
-            CCVFS_ERROR("Direct write failed: %d", result);
-        }
-        return result;
-    }
-    
-    // Handle compression if a compression algorithm is set
-    if (pVfs->pCompressAlg) {
-        // Calculate block number based on offset
-        sqlite3_int64 blockNumber = iOfst / CCVFS_DEFAULT_BLOCK_SIZE;
-        sqlite3_int64 blockOffset = iOfst % CCVFS_DEFAULT_BLOCK_SIZE;
-        
-        CCVFS_DEBUG("Compressing data for block #%lld, offset within block=%lld, data size=%d", 
-                    blockNumber, blockOffset, iAmt);
-        
-        // Ensure the data size matches the expected block size
-        if (iAmt <= CCVFS_DEFAULT_BLOCK_SIZE) {
-            // Allocate buffer for compressed data (slightly larger than original for worst-case scenario)
-            int maxCompressedSize = iAmt + iAmt / 10 + 100; // Add some extra space
-            unsigned char *compressedBuffer = sqlite3_malloc(
-                CCVFS_HEADER_SIZE + 2 * sizeof(int) + maxCompressedSize);
-            
-            if (!compressedBuffer) {
-                CCVFS_ERROR("Failed to allocate memory for compression buffer");
-                return SQLITE_NOMEM;
-            }
-            
-            // Compress the data
-            int compressedSize = pVfs->pCompressAlg->compress(
-                (const unsigned char*)zBuf, iAmt,
-                compressedBuffer + CCVFS_HEADER_SIZE + 2 * sizeof(int),
-                maxCompressedSize);
-            
-            if (compressedSize < 0) {
-                CCVFS_ERROR("Compression failed with error code: %d", compressedSize);
-                sqlite3_free(compressedBuffer);
-                return SQLITE_ERROR;
-            }
-            
-            CCVFS_DEBUG("Compression successful: original size=%d, compressed size=%d", iAmt, compressedSize);
-            
-            // If compression didn't reduce size, store original data
-            if (compressedSize >= iAmt) {
-                CCVFS_DEBUG("Compressed size not smaller than original, storing original data");
-                compressedSize = iAmt;
-                memcpy(compressedBuffer + CCVFS_HEADER_SIZE + 2 * sizeof(int), zBuf, iAmt);
-            }
-            
-            // Prepare block header
-            unsigned int *header = (unsigned int*)compressedBuffer;
-            header[0] = 0x12345678; // Magic number
-            header[1] = (unsigned int)blockNumber;
-            header[2] = 0; // Checksum - to be implemented
-            header[3] = (compressedSize < iAmt) ? 1 : 0; // Flag indicating if data is compressed
-            
-            // Add length fields
-            int *lengthFields = (int*)(compressedBuffer + CCVFS_HEADER_SIZE);
-            lengthFields[0] = compressedSize; // Compressed data length
-            lengthFields[1] = iAmt; // Original data length
-            
-            // Write the compressed block to the file
-            // Calculate physical offset - for now we'll just write sequentially
-            // In a full implementation, we would need to maintain a mapping between logical and physical blocks
-            sqlite3_int64 physicalOffset = blockNumber * (CCVFS_HEADER_SIZE + 2 * sizeof(int) + CCVFS_DEFAULT_BLOCK_SIZE);
-            
-            int result = p->pReal->pMethods->xWrite(
-                p->pReal, 
-                compressedBuffer, 
-                CCVFS_HEADER_SIZE + 2 * sizeof(int) + compressedSize, 
-                physicalOffset);
-            
-            sqlite3_free(compressedBuffer);
-            
-            if (result == SQLITE_OK) {
-                CCVFS_DEBUG("Compressed block written successfully");
-            } else {
-                CCVFS_ERROR("Failed to write compressed block: %d", result);
-            }
-            
-            return result;
-        } else {
-            CCVFS_ERROR("Data size exceeds block size: %d > %d", iAmt, CCVFS_DEFAULT_BLOCK_SIZE);
-            return SQLITE_ERROR;
-        }
-    }
-    
-    // For now, we still call the underlying VFS's write method directly for other cases
-    // The real encryption functionality will be implemented later
-    int result = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Write successful");
-    } else {
-        CCVFS_ERROR("Write failed: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoTruncate(sqlite3_file *pFile, sqlite3_int64 size) {
-    CCVFS_DEBUG("Truncating file: size=%lld", size);
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xTruncate(p->pReal, size);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("File truncated successfully");
-    } else {
-        CCVFS_ERROR("Failed to truncate file: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoSync(sqlite3_file *pFile, int flags) {
-    CCVFS_DEBUG("Synchronizing file: flags=%d", flags);
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xSync(p->pReal, flags);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("File synchronized successfully");
-    } else {
-        CCVFS_ERROR("Failed to synchronize file: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize) {
-    CCVFS_DEBUG("Getting file size");
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xFileSize(p->pReal, pSize);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("File size obtained successfully: %lld", *pSize);
-    } else {
-        CCVFS_ERROR("Failed to get file size: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoLock(sqlite3_file *pFile, int eLock) {
-    CCVFS_DEBUG("Locking file: lock type=%d", eLock);
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xLock(p->pReal, eLock);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("File locked successfully");
-    } else {
-        CCVFS_ERROR("Failed to lock file: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoUnlock(sqlite3_file *pFile, int eLock) {
-    CCVFS_DEBUG("Unlocking file: lock type=%d", eLock);
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xUnlock(p->pReal, eLock);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("File unlocked successfully");
-    } else {
-        CCVFS_ERROR("Failed to unlock file: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoCheckReservedLock(sqlite3_file *pFile, int *pResOut) {
-    CCVFS_DEBUG("Checking reserved lock");
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xCheckReservedLock(p->pReal, pResOut);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Reserved lock check successful: %s", *pResOut ? "locked" : "unlocked");
-    } else {
-        CCVFS_ERROR("Reserved lock check failed: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoFileControl(sqlite3_file *pFile, int op, void *pArg) {
-    CCVFS_DEBUG("File control operation: opcode=%d", op);
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xFileControl(p->pReal, op, pArg);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("File control operation successful");
-    } else {
-        CCVFS_ERROR("File control operation failed: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoSectorSize(sqlite3_file *pFile) {
-    CCVFS_DEBUG("Getting sector size");
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xSectorSize(p->pReal);
-    
-    CCVFS_DEBUG("Sector size: %d", result);
-    return result;
-}
-
-static int ccvfsIoDeviceCharacteristics(sqlite3_file *pFile) {
-    CCVFS_DEBUG("Getting device characteristics");
-    
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    int result = p->pReal->pMethods->xDeviceCharacteristics(p->pReal);
-    
-    CCVFS_DEBUG("Device characteristics: %d", result);
-    return result;
-}
-
-static int ccvfsIoShmMap(sqlite3_file *pFile, int iPg, int pgsz, int b, void volatile** p) {
-    CCVFS_DEBUG("Shared memory mapping: page=%d, page size=%d, map=%d", iPg, pgsz, b);
-    
-    CCVFSFile *pCFile = (CCVFSFile *)pFile;
-    int result = pCFile->pReal->pMethods->xShmMap(pCFile->pReal, iPg, pgsz, b, p);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Shared memory mapping successful");
-    } else {
-        CCVFS_ERROR("Shared memory mapping failed: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoShmLock(sqlite3_file *pFile, int offset, int n, int flags) {
-    CCVFS_DEBUG("Shared memory locking: offset=%d, count=%d, flags=%d", offset, n, flags);
-    
-    CCVFSFile *pCFile = (CCVFSFile *)pFile;
-    int result = pCFile->pReal->pMethods->xShmLock(pCFile->pReal, offset, n, flags);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Shared memory locking successful");
-    } else {
-        CCVFS_ERROR("Shared memory locking failed: %d", result);
-    }
-    
-    return result;
-}
-
-static void ccvfsIoShmBarrier(sqlite3_file *pFile) {
-    CCVFS_DEBUG("Shared memory barrier");
-    
-    CCVFSFile *pCFile = (CCVFSFile *)pFile;
-    pCFile->pReal->pMethods->xShmBarrier(pCFile->pReal);
-    
-    CCVFS_DEBUG("Shared memory barrier completed");
-}
-
-static int ccvfsIoShmUnmap(sqlite3_file *pFile, int deleteFlag) {
-    CCVFS_DEBUG("Shared memory unmapping: delete flag=%d", deleteFlag);
-    
-    CCVFSFile *pCFile = (CCVFSFile *)pFile;
-    int result = pCFile->pReal->pMethods->xShmUnmap(pCFile->pReal, deleteFlag);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Shared memory unmapping successful");
-    } else {
-        CCVFS_ERROR("Shared memory unmapping failed: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoFetch(sqlite3_file *pFile, sqlite3_int64 iOfst, int iAmt, void **pp) {
-    CCVFS_DEBUG("Fetching data: offset=%lld, length=%d", iOfst, iAmt);
-    
-    CCVFSFile *pCFile = (CCVFSFile *)pFile;
-    int result = pCFile->pReal->pMethods->xFetch(pCFile->pReal, iOfst, iAmt, pp);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Data fetch successful");
-    } else {
-        CCVFS_ERROR("Data fetch failed: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsIoUnfetch(sqlite3_file *pFile, sqlite3_int64 iOfst, void *p) {
-    CCVFS_DEBUG("Releasing data: offset=%lld", iOfst);
-    
-    CCVFSFile *pCFile = (CCVFSFile *)pFile;
-    int result = pCFile->pReal->pMethods->xUnfetch(pCFile->pReal, iOfst, p);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Data release successful");
-    } else {
-        CCVFS_ERROR("Data release failed: %d", result);
-    }
-    
-    return result;
-}
+// ============================================================================
+// ALGORITHM REGISTRATION API
+// ============================================================================
 
 /*
- * VFS方法实现
- */
-static int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile, int flags, int *pOutFlags) {
-    CCVFS_DEBUG("Opening file: name=%s, flags=%d", zName ? zName : "(null)", flags);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    CCVFSFile *pCFile = (CCVFSFile *)pFile;
-    int rc;
-    
-    // 设置IO方法
-    pFile->pMethods = &ccvfsIoMethods;
-    
-    // 分配实际文件结构内存
-    pCFile->pReal = (sqlite3_file *)&pCFile[1];
-    pCFile->pOwner = p;
-    
-    CCVFS_DEBUG("Calling underlying VFS to open file");
-    // 调用底层VFS的open方法
-    rc = p->pRootVfs->xOpen(p->pRootVfs, zName, pCFile->pReal, flags, pOutFlags);
-    if (rc != SQLITE_OK) {
-        pFile->pMethods = 0;
-        CCVFS_ERROR("Underlying VFS failed to open file: %d", rc);
-    } else {
-        CCVFS_DEBUG("File opened successfully");
-    }
-    
-    return rc;
-}
-
-static int ccvfsDelete(sqlite3_vfs *pVfs, const char *zName, int syncDir) {
-    CCVFS_DEBUG("Deleting file: name=%s, sync directory=%d", zName, syncDir);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    int result = p->pRootVfs->xDelete(p->pRootVfs, zName, syncDir);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("File deleted successfully");
-    } else {
-        CCVFS_ERROR("Failed to delete file: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsAccess(sqlite3_vfs *pVfs, const char *zName, int flags, int *pResOut) {
-    CCVFS_DEBUG("Access check: name=%s, flags=%d", zName, flags);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    int result = p->pRootVfs->xAccess(p->pRootVfs, zName, flags, pResOut);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Access check successful: %s", *pResOut ? "exists" : "does not exist");
-    } else {
-        CCVFS_ERROR("Access check failed: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsFullPathname(sqlite3_vfs *pVfs, const char *zName, int nOut, char *zOut) {
-    CCVFS_DEBUG("Getting full pathname: name=%s, output buffer size=%d", zName, nOut);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    int result = p->pRootVfs->xFullPathname(p->pRootVfs, zName, nOut, zOut);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Full pathname obtained successfully: %s", zOut);
-    } else {
-        CCVFS_ERROR("Failed to get full pathname: %d", result);
-    }
-    
-    return result;
-}
-
-static void *ccvfsDlOpen(sqlite3_vfs *pVfs, const char *zFilename) {
-    CCVFS_DEBUG("Opening dynamic library: filename=%s", zFilename);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    void *result = p->pRootVfs->xDlOpen(p->pRootVfs, zFilename);
-    
-    if (result) {
-        CCVFS_DEBUG("Dynamic library opened successfully");
-    } else {
-        CCVFS_ERROR("Failed to open dynamic library");
-    }
-    
-    return result;
-}
-
-static void ccvfsDlError(sqlite3_vfs *pVfs, int nByte, char *zErrMsg) {
-    CCVFS_DEBUG("Getting dynamic library error: buffer size=%d", nByte);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    p->pRootVfs->xDlError(p->pRootVfs, nByte, zErrMsg);
-    
-    CCVFS_DEBUG("Dynamic library error message: %s", zErrMsg);
-}
-
-static void *(*ccvfsDlSym(sqlite3_vfs *pVfs, void *pH, const char *zSymbol))(void) {
-    CCVFS_DEBUG("Getting dynamic library symbol: symbol=%s", zSymbol);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    void *(*result)(void) = p->pRootVfs->xDlSym(p->pRootVfs, pH, zSymbol);
-    
-    if (result) {
-        CCVFS_DEBUG("Dynamic library symbol obtained successfully");
-    } else {
-        CCVFS_ERROR("Failed to get dynamic library symbol");
-    }
-    
-    return result;
-}
-
-static void ccvfsDlClose(sqlite3_vfs *pVfs, void *pHandle) {
-    CCVFS_DEBUG("Closing dynamic library");
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    p->pRootVfs->xDlClose(p->pRootVfs, pHandle);
-    
-    CCVFS_DEBUG("Dynamic library closed successfully");
-}
-
-static int ccvfsRandomness(sqlite3_vfs *pVfs, int nByte, char *zOut) {
-    CCVFS_DEBUG("Getting randomness: byte count=%d", nByte);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    int result = p->pRootVfs->xRandomness(p->pRootVfs, nByte, zOut);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Randomness obtained successfully");
-    } else {
-        CCVFS_ERROR("Failed to get randomness: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsSleep(sqlite3_vfs *pVfs, int microseconds) {
-    CCVFS_DEBUG("Sleeping: microseconds=%d", microseconds);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    int result = p->pRootVfs->xSleep(p->pRootVfs, microseconds);
-    
-    CCVFS_DEBUG("Sleep completed");
-    return result;
-}
-
-static int ccvfsCurrentTime(sqlite3_vfs *pVfs, double *pTime) {
-    CCVFS_DEBUG("Getting current time");
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    int result = p->pRootVfs->xCurrentTime(p->pRootVfs, pTime);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Current time obtained successfully: %f", *pTime);
-    } else {
-        CCVFS_ERROR("Failed to get current time: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsGetLastError(sqlite3_vfs *pVfs, int nErr, char *zErr) {
-    CCVFS_DEBUG("Getting last error: buffer size=%d", nErr);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    int result = p->pRootVfs->xGetLastError(p->pRootVfs, nErr, zErr);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Last error obtained successfully: %s", zErr);
-    } else {
-        CCVFS_ERROR("Failed to get last error: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsCurrentTimeInt64(sqlite3_vfs *pVfs, sqlite3_int64 *pTime) {
-    CCVFS_DEBUG("Getting current time (64-bit)");
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    int result = p->pRootVfs->xCurrentTimeInt64(p->pRootVfs, pTime);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("Current time obtained successfully: %lld", *pTime);
-    } else {
-        CCVFS_ERROR("Failed to get current time: %d", result);
-    }
-    
-    return result;
-}
-
-static int ccvfsSetSystemCall(sqlite3_vfs *pVfs, const char *zName, sqlite3_syscall_ptr pFunc) {
-    CCVFS_DEBUG("Setting system call: name=%s", zName);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    int result = p->pRootVfs->xSetSystemCall(p->pRootVfs, zName, pFunc);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("System call set successfully");
-    } else {
-        CCVFS_ERROR("Failed to set system call: %d", result);
-    }
-    
-    return result;
-}
-
-static sqlite3_syscall_ptr ccvfsGetSystemCall(sqlite3_vfs *pVfs, const char *zName) {
-    CCVFS_DEBUG("Getting system call: name=%s", zName);
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    sqlite3_syscall_ptr result = p->pRootVfs->xGetSystemCall(p->pRootVfs, zName);
-    
-    if (result) {
-        CCVFS_DEBUG("System call obtained successfully");
-    } else {
-        CCVFS_ERROR("Failed to get system call");
-    }
-    
-    return result;
-}
-
-static const char *ccvfsNextSystemCall(sqlite3_vfs *pVfs, const char *zName) {
-    CCVFS_DEBUG("Getting next system call: current name=%s", zName ? zName : "(null)");
-    
-    CCVFS *p = (CCVFS *)pVfs;
-    const char *result = p->pRootVfs->xNextSystemCall(p->pRootVfs, zName);
-    
-    if (result) {
-        CCVFS_DEBUG("Next system call obtained successfully: %s", result);
-    } else {
-        CCVFS_DEBUG("No more system calls");
-    }
-    
-    return result;
-}
-
-/*
- * 创建CCVFS
- */
-int sqlite3_ccvfs_create(
-    const char *zVfsName,
-    sqlite3_vfs *pRootVfs,
-    const char *zCompressType,
-    const char *zEncryptType
-) {
-    CCVFS_DEBUG("Creating CCVFS: name=%s, compression algorithm=%s, encryption algorithm=%s", 
-                zVfsName, zCompressType ? zCompressType : "(none)", zEncryptType ? zEncryptType : "(none)");
-    
-    CCVFS *pNew;
-    sqlite3_vfs *pExist;
-    
-    // 检查VFS是否已存在
-    pExist = sqlite3_vfs_find(zVfsName);
-    if (pExist) {
-        CCVFS_ERROR("VFS already exists: %s", zVfsName);
-        return SQLITE_ERROR;
-    }
-    
-    // 如果未指定底层VFS，则使用默认VFS
-    if (!pRootVfs) {
-        pRootVfs = sqlite3_vfs_find(0);
-        CCVFS_DEBUG("Using default VFS as underlying VFS");
-    }
-    
-    // 分配内存
-    pNew = (CCVFS *)sqlite3_malloc(sizeof(CCVFS));
-    if (!pNew) {
-        CCVFS_ERROR("Memory allocation failed: %d bytes", sizeof(CCVFS));
-        return SQLITE_NOMEM;
-    }
-    memset(pNew, 0, sizeof(CCVFS));
-    CCVFS_DEBUG("Allocated CCVFS structure memory: %d bytes", sizeof(CCVFS));
-    
-    // 分配压缩类型字符串内存
-    if (zCompressType) {
-        pNew->zCompressType = sqlite3_mprintf("%s", zCompressType);
-        if (!pNew->zCompressType) {
-            sqlite3_free(pNew);
-            CCVFS_ERROR("Failed to allocate memory for compression type string");
-            return SQLITE_NOMEM;
-        }
-        CCVFS_DEBUG("Set compression type: %s", zCompressType);
-    }
-    
-    // 分配加密类型字符串内存
-    if (zEncryptType) {
-        pNew->zEncryptType = sqlite3_mprintf("%s", zEncryptType);
-        if (!pNew->zEncryptType) {
-            sqlite3_free(pNew->zCompressType);
-            sqlite3_free(pNew);
-            CCVFS_ERROR("Failed to allocate memory for encryption type string");
-            return SQLITE_NOMEM;
-        }
-        CCVFS_DEBUG("Set encryption type: %s", zEncryptType);
-    }
-    
-    // 初始化基础VFS结构
-    pNew->base.iVersion = pRootVfs->iVersion > 3 ? 3 : pRootVfs->iVersion;
-    pNew->base.szOsFile = sizeof(CCVFSFile) + pRootVfs->szOsFile;
-    pNew->base.mxPathname = pRootVfs->mxPathname;
-    pNew->base.zName = zVfsName;
-    pNew->base.pAppData = 0;
-    
-    CCVFS_DEBUG("Initializing VFS structure: version=%d, file size=%d, max pathname length=%d", 
-                pNew->base.iVersion, pNew->base.szOsFile, pNew->base.mxPathname);
-    
-    // 设置VFS方法
-    pNew->base.xOpen = ccvfsOpen;
-    pNew->base.xDelete = ccvfsDelete;
-    pNew->base.xAccess = ccvfsAccess;
-    pNew->base.xFullPathname = ccvfsFullPathname;
-    pNew->base.xDlOpen = ccvfsDlOpen;
-    pNew->base.xDlError = ccvfsDlError;
-    pNew->base.xDlSym = (void (*(*)(sqlite3_vfs*,void*, const char *zSymbol))(void))ccvfsDlSym;
-    pNew->base.xDlClose = ccvfsDlClose;
-    pNew->base.xRandomness = ccvfsRandomness;
-    pNew->base.xSleep = ccvfsSleep;
-    pNew->base.xCurrentTime = ccvfsCurrentTime;
-    pNew->base.xGetLastError = ccvfsGetLastError;
-    
-    // 版本2的方法
-    if (pNew->base.iVersion >= 2) {
-        pNew->base.xCurrentTimeInt64 = ccvfsCurrentTimeInt64;
-        CCVFS_DEBUG("Supporting VFS version 2 features");
-    }
-    
-    // 版本3的方法
-    if (pNew->base.iVersion >= 3) {
-        pNew->base.xSetSystemCall = ccvfsSetSystemCall;
-        pNew->base.xGetSystemCall = ccvfsGetSystemCall;
-        pNew->base.xNextSystemCall = ccvfsNextSystemCall;
-        CCVFS_DEBUG("Supporting VFS version 3 features");
-    }
-    
-    // 保存底层VFS引用
-    pNew->pRootVfs = pRootVfs;
-    
-    CCVFS_DEBUG("Registering VFS");
-    // 注册VFS
-    int result = sqlite3_vfs_register(&pNew->base, 0);
-    
-    if (result == SQLITE_OK) {
-        CCVFS_DEBUG("CCVFS created successfully");
-    } else {
-        sqlite3_free(pNew->zCompressType);
-        sqlite3_free(pNew->zEncryptType);
-        sqlite3_free(pNew);
-        CCVFS_ERROR("Failed to register VFS: %d", result);
-    }
-    
-    return result;
-}
-
-/*
- * 销毁CCVFS
- */
-int sqlite3_ccvfs_destroy(const char *zVfsName) {
-    CCVFS_DEBUG("Destroying CCVFS: name=%s", zVfsName);
-    
-    sqlite3_vfs *pVfs = sqlite3_vfs_find(zVfsName);
-    CCVFS *p;
-    
-    if (!pVfs) {
-        CCVFS_ERROR("VFS not found: %s", zVfsName);
-        return SQLITE_ERROR;
-    }
-    
-    p = (CCVFS *)pVfs;
-    
-    CCVFS_DEBUG("Unregistering VFS");
-    sqlite3_vfs_unregister(pVfs);
-    
-    if (p->zCompressType) {
-        sqlite3_free(p->zCompressType);
-        CCVFS_DEBUG("Freed compression type string memory");
-    }
-    if (p->zEncryptType) {
-        sqlite3_free(p->zEncryptType);
-        CCVFS_DEBUG("Freed encryption type string memory");
-    }
-    sqlite3_free(p);
-    CCVFS_DEBUG("Freed CCVFS structure memory");
-    
-    CCVFS_DEBUG("CCVFS destroyed successfully");
-    return SQLITE_OK;
-}
-
-/*
- * 注册自定义压缩算法
+ * Register compression algorithm
  */
 int sqlite3_ccvfs_register_compress_algorithm(CompressAlgorithm *algorithm) {
-    CCVFS_DEBUG("Registering compression algorithm: name=%s", algorithm ? algorithm->name : "(null)");
+    int i;
     
-    // TODO: 实现算法注册逻辑
-    if (!algorithm) {
-        CCVFS_ERROR("Algorithm pointer is null");
-        return SQLITE_ERROR;
+    if (!algorithm || !algorithm->name || !algorithm->compress || !algorithm->decompress) {
+        CCVFS_ERROR("Invalid compression algorithm");
+        return SQLITE_MISUSE;
     }
     
-    if (!algorithm->name) {
-        CCVFS_ERROR("Algorithm name is null");
-        return SQLITE_ERROR;
+    // Check if algorithm already exists
+    for (i = 0; i < g_compress_algorithm_count; i++) {
+        if (g_compress_algorithms[i] && 
+            strcmp(g_compress_algorithms[i]->name, algorithm->name) == 0) {
+            // Replace existing algorithm
+            g_compress_algorithms[i] = algorithm;
+            CCVFS_INFO("Replaced compression algorithm: %s", algorithm->name);
+            return SQLITE_OK;
+        }
     }
     
-    if (!algorithm->compress || !algorithm->decompress) {
-        CCVFS_ERROR("Algorithm function pointers are null");
-        return SQLITE_ERROR;
+    // Add new algorithm
+    if (g_compress_algorithm_count >= CCVFS_MAX_ALGORITHMS) {
+        CCVFS_ERROR("Too many compression algorithms registered");
+        return SQLITE_FULL;
     }
     
-    CCVFS_DEBUG("Compression algorithm registered successfully");
+    g_compress_algorithms[g_compress_algorithm_count++] = algorithm;
+    CCVFS_INFO("Registered compression algorithm: %s", algorithm->name);
+    
     return SQLITE_OK;
 }
 
 /*
- * 注册自定义加密算法
+ * Register encryption algorithm
  */
 int sqlite3_ccvfs_register_encrypt_algorithm(EncryptAlgorithm *algorithm) {
-    CCVFS_DEBUG("Registering encryption algorithm: name=%s", algorithm ? algorithm->name : "(null)");
+    int i;
     
-    // TODO: 实现算法注册逻辑
-    if (!algorithm) {
-        CCVFS_ERROR("Algorithm pointer is null");
-        return SQLITE_ERROR;
+    if (!algorithm || !algorithm->name || !algorithm->encrypt || !algorithm->decrypt) {
+        CCVFS_ERROR("Invalid encryption algorithm");
+        return SQLITE_MISUSE;
     }
     
-    if (!algorithm->name) {
-        CCVFS_ERROR("Algorithm name is null");
-        return SQLITE_ERROR;
+    // Check if algorithm already exists
+    for (i = 0; i < g_encrypt_algorithm_count; i++) {
+        if (g_encrypt_algorithms[i] && 
+            strcmp(g_encrypt_algorithms[i]->name, algorithm->name) == 0) {
+            // Replace existing algorithm
+            g_encrypt_algorithms[i] = algorithm;
+            CCVFS_INFO("Replaced encryption algorithm: %s", algorithm->name);
+            return SQLITE_OK;
+        }
     }
     
-    if (!algorithm->encrypt || !algorithm->decrypt) {
-        CCVFS_ERROR("Algorithm function pointers are null");
-        return SQLITE_ERROR;
+    // Add new algorithm
+    if (g_encrypt_algorithm_count >= CCVFS_MAX_ALGORITHMS) {
+        CCVFS_ERROR("Too many encryption algorithms registered");
+        return SQLITE_FULL;
     }
     
-    CCVFS_DEBUG("Encryption algorithm registered successfully");
+    g_encrypt_algorithms[g_encrypt_algorithm_count++] = algorithm;
+    CCVFS_INFO("Registered encryption algorithm: %s", algorithm->name);
+    
     return SQLITE_OK;
 }
 
+// ============================================================================
+// HEADER AND INDEX MANAGEMENT
+// ============================================================================
+
 /*
- * 激活压缩加密VFS，类似于sqlite3_activate_cerod
+ * Load file header from disk
  */
-int sqlite3_activate_ccvfs(const char *zCompressType, const char *zEncryptType) {
-    static int isActivated = 0;
+static int ccvfs_load_header(CCVFSFile *pFile) {
+    int rc;
+    sqlite3_int64 fileSize;
     
-    // 防止重复激活
-    if (isActivated) {
+    if (pFile->header_loaded) {
         return SQLITE_OK;
     }
     
-    // 创建并注册VFS
-    int rc = sqlite3_ccvfs_create("ccvfs", NULL, zCompressType, zEncryptType);
+    // Check if file exists and has enough data for header
+    rc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
     if (rc != SQLITE_OK) {
-        CCVFS_ERROR("Failed to activate CCVFS: %d", rc);
+        CCVFS_ERROR("Failed to get file size");
         return rc;
     }
     
-    // 将ccvfs设置为默认VFS
-    sqlite3_vfs *ccvfs = sqlite3_vfs_find("ccvfs");
-    if (ccvfs) {
-        sqlite3_vfs_register(ccvfs, 1);
-        isActivated = 1;
-        CCVFS_INFO("CCVFS activated successfully, set as default VFS");
-        return SQLITE_OK;
-    } else {
-        CCVFS_ERROR("Cannot find the newly created CCVFS");
-        return SQLITE_ERROR;
+    if (fileSize < CCVFS_HEADER_SIZE) {
+        CCVFS_DEBUG("File too small for CCVFS header, treating as new file");
+        return SQLITE_IOERR_READ;
     }
+    
+    // Read header from beginning of file
+    rc = pFile->pReal->pMethods->xRead(pFile->pReal, &pFile->header, 
+                                       CCVFS_HEADER_SIZE, 0);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to read file header");
+        return rc;
+    }
+    
+    // Verify magic number
+    if (memcmp(pFile->header.magic, CCVFS_MAGIC, 8) != 0) {
+        CCVFS_DEBUG("Invalid magic number, not a CCVFS file");
+        return SQLITE_IOERR_READ;
+    }
+    
+    // Verify version
+    if (pFile->header.major_version != CCVFS_VERSION_MAJOR) {
+        CCVFS_ERROR("Unsupported CCVFS version: %d.%d", 
+                    pFile->header.major_version, pFile->header.minor_version);
+        return SQLITE_IOERR_READ;
+    }
+    
+    // Verify header checksum
+    uint32_t calculated_checksum = ccvfs_crc32((const unsigned char*)&pFile->header,
+                                               CCVFS_HEADER_SIZE - sizeof(uint32_t));
+    if (pFile->header.header_checksum != calculated_checksum) {
+        CCVFS_ERROR("Header checksum mismatch");
+        return SQLITE_IOERR_READ;
+    }
+    
+    pFile->header_loaded = 1;
+    
+    CCVFS_DEBUG("Loaded CCVFS header: version %d.%d, %d blocks, compression: %s, encryption: %s",
+                pFile->header.major_version, pFile->header.minor_version,
+                pFile->header.total_blocks, pFile->header.compress_algorithm,
+                pFile->header.encrypt_algorithm);
+    
+    return SQLITE_OK;
 }
 
 /*
- * 实现sqlite3_activate_cerod函数，用于通过PRAGMA激活CCVFS
+ * Save file header to disk
  */
-int sqlite3_activate_cerod(const char *zParms) {
-    // 解析参数，格式为"compress_type:encrypt_type"或仅"compress_type"
-    char *zCompressType = NULL;
-    char *zEncryptType = NULL;
-    char *zCopy = NULL;
-    int rc = SQLITE_OK;
+static int ccvfs_save_header(CCVFSFile *pFile) {
+    int rc;
     
-    if (zParms) {
-        zCopy = sqlite3_mprintf("%s", zParms);
-        if (!zCopy) {
-            return SQLITE_NOMEM;
-        }
-        
-        // 查找分隔符 ':'
-        char *colon = strchr(zCopy, ':');
-        if (colon) {
-            *colon = '\0';
-            zCompressType = zCopy;
-            zEncryptType = colon + 1;
-        } else {
-            zCompressType = zCopy;
-            zEncryptType = NULL;
+    // Calculate header checksum
+    pFile->header.header_checksum = ccvfs_crc32((const unsigned char*)&pFile->header,
+                                                CCVFS_HEADER_SIZE - sizeof(uint32_t));
+    
+    // Write header to beginning of file
+    rc = pFile->pReal->pMethods->xWrite(pFile->pReal, &pFile->header,
+                                        CCVFS_HEADER_SIZE, 0);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to write file header");
+        return rc;
+    }
+    
+    pFile->header_loaded = 1;
+    
+    CCVFS_DEBUG("Saved CCVFS header");
+    return SQLITE_OK;
+}
+
+/*
+ * Load block index table from disk
+ */
+static int ccvfs_load_block_index(CCVFSFile *pFile) {
+    int rc;
+    size_t index_size;
+    
+    if (!pFile->header_loaded) {
+        rc = ccvfs_load_header(pFile);
+        if (rc != SQLITE_OK) {
+            return rc;
         }
     }
     
-    // 激活CCVFS
-    rc = sqlite3_activate_ccvfs(zCompressType, zEncryptType);
-    
-    if (zCopy) {
-        sqlite3_free(zCopy);
+    if (pFile->header.total_blocks == 0) {
+        CCVFS_DEBUG("No blocks in file");
+        return SQLITE_OK;
     }
     
-    return rc;
+    // Allocate memory for block index
+    index_size = pFile->header.total_blocks * sizeof(CCVFSBlockIndex);
+    pFile->pBlockIndex = (CCVFSBlockIndex*)sqlite3_malloc(index_size);
+    if (!pFile->pBlockIndex) {
+        CCVFS_ERROR("Failed to allocate memory for block index");
+        return SQLITE_NOMEM;
+    }
+    
+    // Read block index from file
+    rc = pFile->pReal->pMethods->xRead(pFile->pReal, pFile->pBlockIndex,
+                                       index_size, pFile->header.index_table_offset);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to read block index");
+        sqlite3_free(pFile->pBlockIndex);
+        pFile->pBlockIndex = NULL;
+        return rc;
+    }
+    
+    CCVFS_DEBUG("Loaded block index: %d blocks", pFile->header.total_blocks);
+    return SQLITE_OK;
+}
+
+/*
+ * Save block index table to disk
+ */
+static int ccvfs_save_block_index(CCVFSFile *pFile) {
+    int rc;
+    size_t index_size;
+    
+    if (!pFile->pBlockIndex || pFile->header.total_blocks == 0) {
+        return SQLITE_OK;
+    }
+    
+    index_size = pFile->header.total_blocks * sizeof(CCVFSBlockIndex);
+    
+    // Write block index to file
+    rc = pFile->pReal->pMethods->xWrite(pFile->pReal, pFile->pBlockIndex,
+                                        index_size, pFile->header.index_table_offset);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to write block index");
+        return rc;
+    }
+    
+    CCVFS_DEBUG("Saved block index: %d blocks", pFile->header.total_blocks);
+    return SQLITE_OK;
+}
+
+/*
+ * Initialize new CCVFS file header
+ */
+static int ccvfs_init_header(CCVFSFile *pFile, CCVFS *pVfs) {
+    memset(&pFile->header, 0, sizeof(CCVFSFileHeader));
+    
+    // Basic identification
+    memcpy(pFile->header.magic, CCVFS_MAGIC, 8);
+    pFile->header.major_version = CCVFS_VERSION_MAJOR;
+    pFile->header.minor_version = CCVFS_VERSION_MINOR;
+    pFile->header.header_size = CCVFS_HEADER_SIZE;
+    
+    // SQLite compatibility (will be filled when first SQLite page is written)
+    pFile->header.original_page_size = 4096;  // Default SQLite page size
+    pFile->header.sqlite_version = sqlite3_libversion_number();
+    pFile->header.database_size_pages = 0;
+    
+    // Compression configuration
+    if (pVfs->zCompressType) {
+        strncpy(pFile->header.compress_algorithm, pVfs->zCompressType, 
+                CCVFS_MAX_ALGORITHM_NAME - 1);
+    }
+    if (pVfs->zEncryptType) {
+        strncpy(pFile->header.encrypt_algorithm, pVfs->zEncryptType,
+                CCVFS_MAX_ALGORITHM_NAME - 1);
+    }
+    
+    // Block configuration
+    pFile->header.block_size = CCVFS_DEFAULT_BLOCK_SIZE;
+    pFile->header.total_blocks = 0;
+    pFile->header.index_table_offset = CCVFS_HEADER_SIZE;
+    
+    // Statistics
+    pFile->header.original_file_size = 0;
+    pFile->header.compressed_file_size = 0;
+    pFile->header.compression_ratio = 100;  // No compression initially
+    pFile->header.creation_flags = pVfs->creation_flags;
+    
+    // Security
+    pFile->header.master_key_hash = 0;  // TODO: implement key management
+    pFile->header.timestamp = (uint64_t)time(NULL);
+    
+    pFile->header_loaded = 1;
+    
+    CCVFS_DEBUG("Initialized new CCVFS header");
+    return SQLITE_OK;
+}
+
+/*
+ * Expand block index table
+ */
+static int ccvfs_expand_block_index(CCVFSFile *pFile, uint32_t new_block_count) {
+    CCVFSBlockIndex *new_index;
+    size_t new_size;
+    
+    if (new_block_count <= pFile->header.total_blocks) {
+        return SQLITE_OK;  // Already large enough
+    }
+    
+    new_size = new_block_count * sizeof(CCVFSBlockIndex);
+    new_index = (CCVFSBlockIndex*)sqlite3_realloc(pFile->pBlockIndex, new_size);
+    if (!new_index) {
+        CCVFS_ERROR("Failed to expand block index");
+        return SQLITE_NOMEM;
+    }
+    
+    // Initialize new entries
+    if (pFile->header.total_blocks < new_block_count) {
+        memset(new_index + pFile->header.total_blocks, 0, 
+               (new_block_count - pFile->header.total_blocks) * sizeof(CCVFSBlockIndex));
+    }
+    
+    pFile->pBlockIndex = new_index;
+    pFile->header.total_blocks = new_block_count;
+    
+    CCVFS_DEBUG("Expanded block index to %d blocks", new_block_count);
+    return SQLITE_OK;
 }
