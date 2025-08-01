@@ -157,64 +157,6 @@ int sqlite3_ccvfs_destroy(const char *zVfsName) {
 }
 
 /*
- * Register custom compression algorithm
- */
-int sqlite3_ccvfs_register_compress_algorithm(CompressAlgorithm *algorithm) {
-    if (!algorithm || !algorithm->name) {
-        CCVFS_ERROR("Invalid compression algorithm");
-        return SQLITE_MISUSE;
-    }
-    
-    if (g_compress_algorithm_count >= CCVFS_MAX_ALGORITHMS) {
-        CCVFS_ERROR("Too many compression algorithms registered");
-        return SQLITE_FULL;
-    }
-    
-    // Check for duplicates
-    for (int i = 0; i < g_compress_algorithm_count; i++) {
-        if (g_compress_algorithms[i] && 
-            strcmp(g_compress_algorithms[i]->name, algorithm->name) == 0) {
-            CCVFS_ERROR("Compression algorithm already registered: %s", algorithm->name);
-            return SQLITE_ERROR;
-        }
-    }
-    
-    g_compress_algorithms[g_compress_algorithm_count++] = algorithm;
-    
-    CCVFS_INFO("Registered compression algorithm: %s", algorithm->name);
-    return SQLITE_OK;
-}
-
-/*
- * Register custom encryption algorithm
- */
-int sqlite3_ccvfs_register_encrypt_algorithm(EncryptAlgorithm *algorithm) {
-    if (!algorithm || !algorithm->name) {
-        CCVFS_ERROR("Invalid encryption algorithm");
-        return SQLITE_MISUSE;
-    }
-    
-    if (g_encrypt_algorithm_count >= CCVFS_MAX_ALGORITHMS) {
-        CCVFS_ERROR("Too many encryption algorithms registered");
-        return SQLITE_FULL;
-    }
-    
-    // Check for duplicates
-    for (int i = 0; i < g_encrypt_algorithm_count; i++) {
-        if (g_encrypt_algorithms[i] && 
-            strcmp(g_encrypt_algorithms[i]->name, algorithm->name) == 0) {
-            CCVFS_ERROR("Encryption algorithm already registered: %s", algorithm->name);
-            return SQLITE_ERROR;
-        }
-    }
-    
-    g_encrypt_algorithms[g_encrypt_algorithm_count++] = algorithm;
-    
-    CCVFS_INFO("Registered encryption algorithm: %s", algorithm->name);
-    return SQLITE_OK;
-}
-
-/*
  * Activate CCVFS (similar to sqlite3_activate_cerod)
  */
 int sqlite3_activate_ccvfs(const char *zCompressType, const char *zEncryptType) {

@@ -15,6 +15,12 @@ EncryptAlgorithm* ccvfs_find_encrypt_algorithm(const char *name);
 void ccvfs_init_builtin_algorithms(void);
 
 /*
+ * Algorithm listing functions
+ */
+int ccvfs_list_compress_algorithms(char *buffer, int buffer_size);
+int ccvfs_list_encrypt_algorithms(char *buffer, int buffer_size);
+
+/*
  * Global algorithm registries (declared here, defined in ccvfs_algorithm.c)
  */
 extern CompressAlgorithm *g_compress_algorithms[CCVFS_MAX_ALGORITHMS];

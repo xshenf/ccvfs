@@ -5,7 +5,9 @@
       "Bash(find . -name \"*.c\" -o -name \"*.h\")",
       "Bash(mkdir -p build)",
       "Bash(cmake ..)",
-      "Bash(make)"
+      "Bash(make)",
+      "Bash(find E:workspacesqlitecc -name \"*.h\" -o -name \"*.c\")",
+      "Bash(ls:*)"
     ],
     "deny": []
   }

@@ -1,5 +1,8 @@
 #include "ccvfs_io.h"
 #include "ccvfs_block.h"
+#include "ccvfs_core.h"
+#include "ccvfs_utils.h"
+#include <string.h>
 
 /*
  * IO Methods table
@@ -27,7 +30,7 @@ sqlite3_io_methods ccvfsIoMethods = {
 };
 
 /*
- * Close file
+ * Close file and clean up resources
  */
 int ccvfsIoClose(sqlite3_file *pFile) {
     CCVFSFile *p = (CCVFSFile *)pFile;
@@ -36,7 +39,28 @@ int ccvfsIoClose(sqlite3_file *pFile) {
     CCVFS_DEBUG("Closing CCVFS file");
     
     if (p->pReal) {
-        rc = p->pReal->pMethods->xClose(p->pReal);
+        // Save block index before closing
+        if (p->pBlockIndex && p->header_loaded) {
+            int saveRc = ccvfs_save_block_index(p);
+            if (saveRc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to save block index: %d", saveRc);
+                rc = saveRc;
+            }
+            
+            // Save header
+            saveRc = ccvfs_save_header(p);
+            if (saveRc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to save header: %d", saveRc);
+                rc = saveRc;
+            }
+        }
+        
+        // Close underlying file
+        int closeRc = p->pReal->pMethods->xClose(p->pReal);
+        if (closeRc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to close underlying file: %d", closeRc);
+            rc = closeRc;
+        }
     }
     
     // Free block index
@@ -45,10 +69,144 @@ int ccvfsIoClose(sqlite3_file *pFile) {
         p->pBlockIndex = NULL;
     }
     
-    // TODO: Free index manager cache
-    
-    CCVFS_DEBUG("CCVFS file closed with result: %d", rc);
+    CCVFS_INFO("CCVFS file closed");
     return rc;
+}
+
+/*
+ * Get block number from file offset
+ */
+static uint32_t getBlockNumber(sqlite3_int64 offset, uint32_t blockSize) {
+    return (uint32_t)(offset / blockSize);
+}
+
+/*
+ * Get offset within block
+ */
+static uint32_t getBlockOffset(sqlite3_int64 offset, uint32_t blockSize) {
+    return (uint32_t)(offset % blockSize);
+}
+
+/*
+ * Read and decompress a block from file
+ */
+static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer, uint32_t bufferSize) {
+    CCVFS_DEBUG("Reading block %u", blockNum);
+    
+    if (!pFile->header_loaded) {
+        int rc = ccvfs_load_header(pFile);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to load header: %d", rc);
+            return rc;
+        }
+    }
+    
+    // Check if block index is loaded
+    if (!pFile->pBlockIndex) {
+        int rc = ccvfs_load_block_index(pFile);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to load block index: %d", rc);
+            return rc;
+        }
+    }
+    
+    // Check block number validity
+    if (blockNum >= pFile->header.total_blocks) {
+        CCVFS_DEBUG("Block %u beyond total blocks %u, treating as zero", blockNum, pFile->header.total_blocks);
+        memset(buffer, 0, bufferSize);
+        return SQLITE_OK;
+    }
+    
+    CCVFSBlockIndex *pIndex = &pFile->pBlockIndex[blockNum];
+    
+    // If block has no physical storage (sparse), return zeros
+    if (pIndex->physical_offset == 0) {
+        CCVFS_DEBUG("Block %u is sparse, returning zeros", blockNum);
+        memset(buffer, 0, bufferSize);
+        return SQLITE_OK;
+    }
+    
+    // Allocate temporary buffer for compressed data
+    unsigned char *compressedData = sqlite3_malloc(pIndex->compressed_size);
+    if (!compressedData) {
+        CCVFS_ERROR("Failed to allocate memory for compressed data");
+        return SQLITE_NOMEM;
+    }
+    
+    // Read compressed block data
+    int rc = pFile->pReal->pMethods->xRead(pFile->pReal, compressedData, 
+                                          pIndex->compressed_size, 
+                                          pIndex->physical_offset);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to read compressed block data: %d", rc);
+        sqlite3_free(compressedData);
+        return rc;
+    }
+    
+    // Verify checksum
+    uint32_t checksum = ccvfs_crc32(compressedData, pIndex->compressed_size);
+    if (checksum != pIndex->checksum) {
+        CCVFS_ERROR("Block %u checksum mismatch: expected 0x%08x, got 0x%08x", 
+                   blockNum, pIndex->checksum, checksum);
+        sqlite3_free(compressedData);
+        return SQLITE_CORRUPT;
+    }
+    
+    // Decrypt if needed
+    unsigned char *decryptedData = compressedData;
+    if (pFile->pOwner->pEncryptAlg && (pIndex->flags & CCVFS_BLOCK_ENCRYPTED)) {
+        decryptedData = sqlite3_malloc(pIndex->compressed_size);
+        if (!decryptedData) {
+            CCVFS_ERROR("Failed to allocate memory for decrypted data");
+            sqlite3_free(compressedData);
+            return SQLITE_NOMEM;
+        }
+        
+        // Use a simple key for now (in real implementation, this should come from user)
+        unsigned char key[16] = "default_key_123";
+        rc = pFile->pOwner->pEncryptAlg->decrypt(key, 16, compressedData, 
+                                               pIndex->compressed_size,
+                                               decryptedData, pIndex->compressed_size);
+        if (rc < 0) {
+            CCVFS_ERROR("Failed to decrypt block %u: %d", blockNum, rc);
+            sqlite3_free(compressedData);
+            sqlite3_free(decryptedData);
+            return SQLITE_CORRUPT;
+        }
+        sqlite3_free(compressedData);
+    }
+    
+    // Decompress if needed
+    if (pFile->pOwner->pCompressAlg && (pIndex->flags & CCVFS_BLOCK_COMPRESSED)) {
+        rc = pFile->pOwner->pCompressAlg->decompress(decryptedData, pIndex->compressed_size,
+                                                   buffer, bufferSize);
+        if (rc < 0) {
+            CCVFS_ERROR("Failed to decompress block %u: %d", blockNum, rc);
+            if (decryptedData != compressedData) sqlite3_free(decryptedData);
+            return SQLITE_CORRUPT;
+        }
+        
+        // Fill remaining buffer with zeros
+        if ((uint32_t)rc < bufferSize) {
+            memset(buffer + rc, 0, bufferSize - rc);
+        }
+    } else {
+        // No compression, copy data directly
+        uint32_t copySize = (pIndex->original_size < bufferSize) ? pIndex->original_size : bufferSize;
+        memcpy(buffer, decryptedData, copySize);
+        
+        // Fill remaining buffer with zeros
+        if (copySize < bufferSize) {
+            memset(buffer + copySize, 0, bufferSize - copySize);
+        }
+    }
+    
+    if (decryptedData != compressedData) {
+        sqlite3_free(decryptedData);
+    }
+    
+    CCVFS_VERBOSE("Successfully read and decompressed block %u", blockNum);
+    return SQLITE_OK;
 }
 
 /*
@@ -57,6 +215,8 @@ int ccvfsIoClose(sqlite3_file *pFile) {
 int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     CCVFS *pVfs = p->pOwner;
+    unsigned char *buffer = (unsigned char*)zBuf;
+    int bytesRead = 0;
     int rc;
     
     CCVFS_DEBUG("Reading %d bytes at offset %lld", iAmt, iOfst);
@@ -77,10 +237,183 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
         return p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
     }
     
-    // TODO: Implement full compressed read logic
-    // For now, just read directly (placeholder)
-    CCVFS_DEBUG("Compressed read not fully implemented, reading directly");
-    return p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
+    uint32_t blockSize = p->header.block_size;
+    uint32_t startBlock = getBlockNumber(iOfst, blockSize);
+    uint32_t startOffset = getBlockOffset(iOfst, blockSize);
+    
+    // Allocate block buffer
+    unsigned char *blockBuffer = sqlite3_malloc(blockSize);
+    if (!blockBuffer) {
+        CCVFS_ERROR("Failed to allocate block buffer");
+        return SQLITE_NOMEM;
+    }
+    
+    while (bytesRead < iAmt) {
+        uint32_t currentBlock = startBlock + (bytesRead + startOffset) / blockSize;
+        uint32_t currentOffset = (startOffset + bytesRead) % blockSize;
+        uint32_t bytesToRead = blockSize - currentOffset;
+        
+        if (bytesToRead > (uint32_t)(iAmt - bytesRead)) {
+            bytesToRead = iAmt - bytesRead;
+        }
+        
+        // Read block
+        rc = readBlock(p, currentBlock, blockBuffer, blockSize);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to read block %u: %d", currentBlock, rc);
+            sqlite3_free(blockBuffer);
+            return rc;
+        }
+        
+        // Copy data from block buffer
+        memcpy(buffer + bytesRead, blockBuffer + currentOffset, bytesToRead);
+        bytesRead += bytesToRead;
+    }
+    
+    sqlite3_free(blockBuffer);
+    
+    CCVFS_VERBOSE("Successfully read %d bytes from offset %lld", iAmt, iOfst);
+    return SQLITE_OK;
+}
+
+/*
+ * Compress and write a block to file
+ */
+static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *data, uint32_t dataSize) {
+    CCVFS_DEBUG("Writing block %u, size %u", blockNum, dataSize);
+    
+    if (!pFile->header_loaded) {
+        int rc = ccvfs_init_header(pFile, pFile->pOwner);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to initialize header: %d", rc);
+            return rc;
+        }
+    }
+    
+    // Ensure block index is large enough
+    if (blockNum >= pFile->header.total_blocks) {
+        int rc = ccvfs_expand_block_index(pFile, blockNum + 1);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to expand block index: %d", rc);
+            return rc;
+        }
+    }
+    
+    CCVFSBlockIndex *pIndex = &pFile->pBlockIndex[blockNum];
+    
+    // Check if block is all zeros (sparse block optimization)
+    int isZeroBlock = 1;
+    for (uint32_t i = 0; i < dataSize; i++) {
+        if (data[i] != 0) {
+            isZeroBlock = 0;
+            break;
+        }
+    }
+    
+    if (isZeroBlock) {
+        CCVFS_DEBUG("Block %u is all zeros, treating as sparse", blockNum);
+        pIndex->physical_offset = 0;
+        pIndex->compressed_size = 0;
+        pIndex->original_size = dataSize;
+        pIndex->checksum = 0;
+        pIndex->flags = CCVFS_BLOCK_SPARSE;
+        return SQLITE_OK;
+    }
+    
+    // Prepare compression buffer
+    unsigned char *compressedData = NULL;
+    uint32_t compressedSize = dataSize;
+    uint32_t flags = 0;
+    
+    if (pFile->pOwner->pCompressAlg) {
+        int maxCompressedSize = pFile->pOwner->pCompressAlg->get_max_compressed_size(dataSize);
+        compressedData = sqlite3_malloc(maxCompressedSize);
+        if (!compressedData) {
+            CCVFS_ERROR("Failed to allocate memory for compression");
+            return SQLITE_NOMEM;
+        }
+        
+        int rc = pFile->pOwner->pCompressAlg->compress(data, dataSize, compressedData, maxCompressedSize, 1);
+        if (rc > 0 && (uint32_t)rc < dataSize) {
+            // Compression successful and beneficial
+            compressedSize = rc;
+            flags |= CCVFS_BLOCK_COMPRESSED;
+            CCVFS_VERBOSE("Block %u compressed from %u to %u bytes", blockNum, dataSize, compressedSize);
+        } else {
+            // Compression failed or not beneficial, use original data
+            sqlite3_free(compressedData);
+            compressedData = NULL;
+            compressedSize = dataSize;
+            CCVFS_DEBUG("Block %u compression not beneficial, using original data", blockNum);
+        }
+    }
+    
+    // Use original data if no compression or compression failed
+    const unsigned char *dataToWrite = compressedData ? compressedData : data;
+    
+    // Encrypt if needed
+    unsigned char *encryptedData = NULL;
+    if (pFile->pOwner->pEncryptAlg) {
+        encryptedData = sqlite3_malloc(compressedSize + 16); // Add padding for encryption
+        if (!encryptedData) {
+            CCVFS_ERROR("Failed to allocate memory for encryption");
+            if (compressedData) sqlite3_free(compressedData);
+            return SQLITE_NOMEM;
+        }
+        
+        // Use a simple key for now (in real implementation, this should come from user)
+        unsigned char key[16] = "default_key_123";
+        int rc = pFile->pOwner->pEncryptAlg->encrypt(key, 16, dataToWrite, compressedSize,
+                                                   encryptedData, compressedSize + 16);
+        if (rc > 0) {
+            compressedSize = rc;
+            flags |= CCVFS_BLOCK_ENCRYPTED;
+            dataToWrite = encryptedData;
+            CCVFS_VERBOSE("Block %u encrypted, size %u", blockNum, compressedSize);
+        } else {
+            CCVFS_ERROR("Failed to encrypt block %u: %d", blockNum, rc);
+            sqlite3_free(encryptedData);
+            if (compressedData) sqlite3_free(compressedData);
+            return SQLITE_IOERR;
+        }
+    }
+    
+    // Calculate checksum
+    uint32_t checksum = ccvfs_crc32(dataToWrite, compressedSize);
+    
+    // Get file size to append new block
+    sqlite3_int64 fileSize;
+    int rc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to get file size: %d", rc);
+        if (encryptedData) sqlite3_free(encryptedData);
+        if (compressedData) sqlite3_free(compressedData);
+        return rc;
+    }
+    
+    // Write block data at end of file
+    sqlite3_int64 writeOffset = fileSize;
+    rc = pFile->pReal->pMethods->xWrite(pFile->pReal, dataToWrite, compressedSize, writeOffset);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to write block data: %d", rc);
+        if (encryptedData) sqlite3_free(encryptedData);
+        if (compressedData) sqlite3_free(compressedData);
+        return rc;
+    }
+    
+    // Update block index
+    pIndex->physical_offset = writeOffset;
+    pIndex->compressed_size = compressedSize;
+    pIndex->original_size = dataSize;
+    pIndex->checksum = checksum;
+    pIndex->flags = flags;
+    
+    // Clean up
+    if (encryptedData) sqlite3_free(encryptedData);
+    if (compressedData) sqlite3_free(compressedData);
+    
+    CCVFS_VERBOSE("Successfully wrote block %u at offset %lld", blockNum, writeOffset);
+    return SQLITE_OK;
 }
 
 /*
@@ -89,6 +422,8 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
 int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     CCVFS *pVfs = p->pOwner;
+    const unsigned char *data = (const unsigned char*)zBuf;
+    int bytesWritten = 0;
     int rc;
     
     CCVFS_DEBUG("Writing %d bytes at offset %lld", iAmt, iOfst);
@@ -115,21 +450,88 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
         return p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
     }
     
-    // TODO: Implement full compressed write logic
-    // For now, just write directly (placeholder)
-    CCVFS_DEBUG("Compressed write not fully implemented, writing directly");
-    return p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
+    uint32_t blockSize = p->header.block_size;
+    uint32_t startBlock = getBlockNumber(iOfst, blockSize);
+    uint32_t startOffset = getBlockOffset(iOfst, blockSize);
+    
+    // Allocate block buffer
+    unsigned char *blockBuffer = sqlite3_malloc(blockSize);
+    if (!blockBuffer) {
+        CCVFS_ERROR("Failed to allocate block buffer");
+        return SQLITE_NOMEM;
+    }
+    
+    while (bytesWritten < iAmt) {
+        uint32_t currentBlock = startBlock + (bytesWritten + startOffset) / blockSize;
+        uint32_t currentOffset = (startOffset + bytesWritten) % blockSize;
+        uint32_t bytesToWrite = blockSize - currentOffset;
+        
+        if (bytesToWrite > (uint32_t)(iAmt - bytesWritten)) {
+            bytesToWrite = iAmt - bytesWritten;
+        }
+        
+        // If we're not writing a full block, read existing data first
+        if (currentOffset != 0 || bytesToWrite != blockSize) {
+            rc = readBlock(p, currentBlock, blockBuffer, blockSize);
+            if (rc != SQLITE_OK) {
+                // If block doesn't exist, fill with zeros
+                memset(blockBuffer, 0, blockSize);
+            }
+        }
+        
+        // Copy new data into block buffer
+        memcpy(blockBuffer + currentOffset, data + bytesWritten, bytesToWrite);
+        
+        // Write modified block
+        rc = writeBlock(p, currentBlock, blockBuffer, blockSize);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to write block %u: %d", currentBlock, rc);
+            sqlite3_free(blockBuffer);
+            return rc;
+        }
+        
+        bytesWritten += bytesToWrite;
+    }
+    
+    sqlite3_free(blockBuffer);
+    
+    CCVFS_VERBOSE("Successfully wrote %d bytes to offset %lld", iAmt, iOfst);
+    return SQLITE_OK;
 }
 
 /*
- * Truncate file
+ * Truncate file to specified size
  */
 int ccvfsIoTruncate(sqlite3_file *pFile, sqlite3_int64 size) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
     CCVFS_DEBUG("Truncating file to %lld bytes", size);
     
-    return p->pReal->pMethods->xTruncate(p->pReal, size);
+    if (!p->header_loaded) {
+        int rc = ccvfs_load_header(p);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to load header: %d", rc);
+            return rc;
+        }
+    }
+    
+    uint32_t blockSize = p->header.block_size;
+    uint32_t newBlockCount = (uint32_t)((size + blockSize - 1) / blockSize);
+    
+    // Update header
+    p->header.database_size_pages = (uint32_t)(size / blockSize);
+    
+    // If reducing size, we could free unused blocks here
+    // For now, just update the block count
+    if (newBlockCount < p->header.total_blocks) {
+        p->header.total_blocks = newBlockCount;
+    }
+    
+    // Truncate underlying file would be more complex as we'd need to compact blocks
+    // For now, we just update metadata
+    
+    CCVFS_VERBOSE("File truncated to size %lld", size);
+    return SQLITE_OK;
 }
 
 /*
@@ -140,7 +542,32 @@ int ccvfsIoSync(sqlite3_file *pFile, int flags) {
     
     CCVFS_DEBUG("Syncing file with flags %d", flags);
     
-    return p->pReal->pMethods->xSync(p->pReal, flags);
+    // Save block index and header first
+    if (p->pBlockIndex && p->header_loaded) {
+        int rc = ccvfs_save_block_index(p);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to save block index: %d", rc);
+            return rc;
+        }
+        
+        rc = ccvfs_save_header(p);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to save header: %d", rc);
+            return rc;
+        }
+    }
+    
+    // Sync underlying file
+    if (p->pReal && p->pReal->pMethods->xSync) {
+        int rc = p->pReal->pMethods->xSync(p->pReal, flags);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to sync underlying file: %d", rc);
+            return rc;
+        }
+    }
+    
+    CCVFS_VERBOSE("File synced successfully");
+    return SQLITE_OK;
 }
 
 /*
@@ -149,11 +576,21 @@ int ccvfsIoSync(sqlite3_file *pFile, int flags) {
 int ccvfsIoFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    int rc = p->pReal->pMethods->xFileSize(p->pReal, pSize);
+    CCVFS_DEBUG("Getting file size");
     
-    CCVFS_DEBUG("File size: %lld bytes", *pSize);
+    if (!p->header_loaded) {
+        int rc = ccvfs_load_header(p);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to load header: %d", rc);
+            return rc;
+        }
+    }
     
-    return rc;
+    // Return logical file size based on block structure
+    *pSize = (sqlite3_int64)p->header.database_size_pages * p->header.block_size;
+    
+    CCVFS_VERBOSE("File size: %lld bytes", *pSize);
+    return SQLITE_OK;
 }
 
 /*
@@ -162,7 +599,13 @@ int ccvfsIoFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize) {
 int ccvfsIoLock(sqlite3_file *pFile, int eLock) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    return p->pReal->pMethods->xLock(p->pReal, eLock);
+    CCVFS_DEBUG("Locking file with level %d", eLock);
+    
+    if (p->pReal && p->pReal->pMethods->xLock) {
+        return p->pReal->pMethods->xLock(p->pReal, eLock);
+    }
+    
+    return SQLITE_OK;
 }
 
 /*
@@ -171,7 +614,13 @@ int ccvfsIoLock(sqlite3_file *pFile, int eLock) {
 int ccvfsIoUnlock(sqlite3_file *pFile, int eLock) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    return p->pReal->pMethods->xUnlock(p->pReal, eLock);
+    CCVFS_DEBUG("Unlocking file with level %d", eLock);
+    
+    if (p->pReal && p->pReal->pMethods->xUnlock) {
+        return p->pReal->pMethods->xUnlock(p->pReal, eLock);
+    }
+    
+    return SQLITE_OK;
 }
 
 /*
@@ -180,16 +629,31 @@ int ccvfsIoUnlock(sqlite3_file *pFile, int eLock) {
 int ccvfsIoCheckReservedLock(sqlite3_file *pFile, int *pResOut) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    return p->pReal->pMethods->xCheckReservedLock(p->pReal, pResOut);
+    CCVFS_DEBUG("Checking reserved lock");
+    
+    if (p->pReal && p->pReal->pMethods->xCheckReservedLock) {
+        return p->pReal->pMethods->xCheckReservedLock(p->pReal, pResOut);
+    }
+    
+    *pResOut = 0;
+    return SQLITE_OK;
 }
 
 /*
- * File control
+ * File control operations
  */
 int ccvfsIoFileControl(sqlite3_file *pFile, int op, void *pArg) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    return p->pReal->pMethods->xFileControl(p->pReal, op, pArg);
+    CCVFS_DEBUG("File control operation %d", op);
+    
+    // Handle CCVFS specific operations here if needed
+    
+    if (p->pReal && p->pReal->pMethods->xFileControl) {
+        return p->pReal->pMethods->xFileControl(p->pReal, op, pArg);
+    }
+    
+    return SQLITE_NOTFOUND;
 }
 
 /*
@@ -198,7 +662,11 @@ int ccvfsIoFileControl(sqlite3_file *pFile, int op, void *pArg) {
 int ccvfsIoSectorSize(sqlite3_file *pFile) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    return p->pReal->pMethods->xSectorSize(p->pReal);
+    if (p->pReal && p->pReal->pMethods->xSectorSize) {
+        return p->pReal->pMethods->xSectorSize(p->pReal);
+    }
+    
+    return 4096; // Default sector size
 }
 
 /*
@@ -207,59 +675,75 @@ int ccvfsIoSectorSize(sqlite3_file *pFile) {
 int ccvfsIoDeviceCharacteristics(sqlite3_file *pFile) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    return p->pReal->pMethods->xDeviceCharacteristics(p->pReal);
+    if (p->pReal && p->pReal->pMethods->xDeviceCharacteristics) {
+        return p->pReal->pMethods->xDeviceCharacteristics(p->pReal);
+    }
+    
+    return 0;
 }
 
 /*
- * Shared memory map
+ * Shared memory map - pass through to underlying VFS
  */
 int ccvfsIoShmMap(sqlite3_file *pFile, int iPg, int pgsz, int bExtend, void volatile **pp) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    return p->pReal->pMethods->xShmMap(p->pReal, iPg, pgsz, bExtend, pp);
+    if (p->pReal && p->pReal->pMethods->xShmMap) {
+        return p->pReal->pMethods->xShmMap(p->pReal, iPg, pgsz, bExtend, pp);
+    }
+    
+    return SQLITE_IOERR_SHMMAP;
 }
 
 /*
- * Shared memory lock
+ * Shared memory lock - pass through to underlying VFS
  */
 int ccvfsIoShmLock(sqlite3_file *pFile, int offset, int n, int flags) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    return p->pReal->pMethods->xShmLock(p->pReal, offset, n, flags);
+    if (p->pReal && p->pReal->pMethods->xShmLock) {
+        return p->pReal->pMethods->xShmLock(p->pReal, offset, n, flags);
+    }
+    
+    return SQLITE_IOERR_SHMLOCK;
 }
 
 /*
- * Shared memory barrier
+ * Shared memory barrier - pass through to underlying VFS
  */
 void ccvfsIoShmBarrier(sqlite3_file *pFile) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    p->pReal->pMethods->xShmBarrier(p->pReal);
+    if (p->pReal && p->pReal->pMethods->xShmBarrier) {
+        p->pReal->pMethods->xShmBarrier(p->pReal);
+    }
 }
 
 /*
- * Shared memory unmap
+ * Shared memory unmap - pass through to underlying VFS
  */
 int ccvfsIoShmUnmap(sqlite3_file *pFile, int deleteFlag) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
-    return p->pReal->pMethods->xShmUnmap(p->pReal, deleteFlag);
+    if (p->pReal && p->pReal->pMethods->xShmUnmap) {
+        return p->pReal->pMethods->xShmUnmap(p->pReal, deleteFlag);
+    }
+    
+    return SQLITE_OK;
 }
 
 /*
- * Fetch
+ * Fetch page - not supported for compressed VFS
  */
 int ccvfsIoFetch(sqlite3_file *pFile, sqlite3_int64 iOfst, int iAmt, void **pp) {
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    
-    return p->pReal->pMethods->xFetch(p->pReal, iOfst, iAmt, pp);
+    CCVFS_DEBUG("Fetch operation not supported for compressed VFS");
+    return SQLITE_IOERR;
 }
 
 /*
- * Unfetch
+ * Unfetch page - not supported for compressed VFS
  */
 int ccvfsIoUnfetch(sqlite3_file *pFile, sqlite3_int64 iOfst, void *pPage) {
-    CCVFSFile *p = (CCVFSFile *)pFile;
-    
-    return p->pReal->pMethods->xUnfetch(p->pReal, iOfst, pPage);
+    CCVFS_DEBUG("Unfetch operation not supported for compressed VFS");
+    return SQLITE_OK;
 }
