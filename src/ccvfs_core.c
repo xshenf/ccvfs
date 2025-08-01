@@ -19,6 +19,9 @@ int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile,
     memset(pCcvfsFile, 0, sizeof(CCVFSFile));
     pCcvfsFile->base.pMethods = &ccvfsIoMethods;
     pCcvfsFile->pOwner = pCcvfs;
+    pCcvfsFile->open_flags = flags;
+    pCcvfsFile->is_ccvfs_file = 0;  // Default to non-CCVFS file
+    pCcvfsFile->header_loaded = 0;
     
     // Allocate space for the real file structure
     pRealFile = (sqlite3_file*)&pCcvfsFile[1];
@@ -32,7 +35,48 @@ int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile,
     
     pCcvfsFile->pReal = pRealFile;
     
-    CCVFS_DEBUG("Successfully opened file");
+    // Determine file type at open time
+    if (flags & SQLITE_OPEN_CREATE) {
+        // Creating new file - it will be CCVFS format if we have compression/encryption
+        if (pCcvfs->pCompressAlg || pCcvfs->pEncryptAlg) {
+            pCcvfsFile->is_ccvfs_file = 1;
+            CCVFS_DEBUG("Creating new CCVFS file");
+        } else {
+            CCVFS_DEBUG("Creating new regular file (no compression/encryption)");
+        }
+    } else {
+        // Opening existing file - check if it's CCVFS format
+        sqlite3_int64 fileSize;
+        rc = pRealFile->pMethods->xFileSize(pRealFile, &fileSize);
+        if (rc == SQLITE_OK && fileSize >= CCVFS_HEADER_SIZE) {
+            // Try to load header to determine file type
+            rc = ccvfs_load_header(pCcvfsFile);
+            if (rc == SQLITE_OK) {
+                pCcvfsFile->is_ccvfs_file = 1;
+                CCVFS_DEBUG("Opened existing CCVFS file");
+                
+                // Load block index for existing CCVFS files
+                rc = ccvfs_load_block_index(pCcvfsFile);
+                if (rc != SQLITE_OK) {
+                    CCVFS_ERROR("Failed to load block index: %d", rc);
+                    pRealFile->pMethods->xClose(pRealFile);
+                    return rc;
+                }
+            } else {
+                // Not a CCVFS file or invalid header
+                pCcvfsFile->is_ccvfs_file = 0;
+                pCcvfsFile->header_loaded = 0;
+                CCVFS_DEBUG("Opened existing regular file");
+            }
+        } else {
+            // File too small or error reading - treat as regular file
+            pCcvfsFile->is_ccvfs_file = 0;
+            CCVFS_DEBUG("Opened existing regular file (too small for CCVFS)");
+        }
+    }
+    
+    CCVFS_DEBUG("Successfully opened file (CCVFS: %s)", 
+                pCcvfsFile->is_ccvfs_file ? "yes" : "no");
     return SQLITE_OK;
 }
 

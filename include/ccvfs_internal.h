@@ -55,6 +55,8 @@ typedef struct CCVFSFile {
     CCVFSFileHeader header;     /* Cached file header */
     CCVFSBlockIndex *pBlockIndex; /* Block index table */
     int header_loaded;          /* Header loaded flag */
+    int open_flags;             /* File open flags */
+    int is_ccvfs_file;          /* Is this a CCVFS format file */
 } CCVFSFile;
 
 #ifdef __cplusplus
