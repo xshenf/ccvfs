@@ -27,7 +27,9 @@
       "Bash(./safe_compression_test.exe)",
       "Bash(rm:*)",
       "Bash(./basic_test.exe)",
-      "Bash(./simple_test.exe)"
+      "Bash(./simple_test.exe)",
+      "Bash(./core_algorithm_test.exe)",
+      "Bash(./vfs_connection_test.exe)"
     ],
     "deny": []
   }

@@ -83,8 +83,11 @@ if(LZMA_FOUND)
 endif()
 
 # Essential test programs
-add_executable(simple_test test/simple_test.c)
-target_link_libraries(simple_test sqlitecc)
+add_executable(core_algorithm_test test/core_algorithm_test.c)
+target_link_libraries(core_algorithm_test sqlitecc)
+
+add_executable(vfs_connection_test test/vfs_connection_test.c)
+target_link_libraries(vfs_connection_test sqlitecc)
 
 add_executable(compression_ratio_test test/compression_ratio_test.c)
 target_link_libraries(compression_ratio_test sqlitecc)
