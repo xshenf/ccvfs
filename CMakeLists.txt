@@ -10,7 +10,9 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DSQLITE_ENABLE_FTS5")
 option(ENABLE_DEBUG "Enable debug output" OFF)
 option(ENABLE_VERBOSE "Enable verbose output" OFF)
 
-add_definitions(-DDEBUG)
+if(ENABLE_DEBUG)
+    add_definitions(-DDEBUG)
+endif()
 
 if(ENABLE_VERBOSE)
     add_definitions(-DVERBOSE)
@@ -58,10 +60,6 @@ target_link_libraries(large_db_zlib_test sqlitecc)
 add_executable(shell src/shell.c)
 target_link_libraries(shell sqlitecc)
 
-# 算法测试程序
-add_executable(algorithm_test test/algorithm_test.c)
-target_link_libraries(algorithm_test sqlitecc)
-
 # 链接数学库（某些平台需要）
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_main m)
@@ -69,5 +67,4 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(large_db_test_utf8 m)
     target_link_libraries(large_db_zlib_test m)
     target_link_libraries(shell m)
-    target_link_libraries(algorithm_test m)
 endif()

@@ -87,28 +87,23 @@ static int rle_compress(const unsigned char *input, int input_len,
             if (j + 3 > output_len) return -1;
             output[j++] = 0xFF;  // RLE marker
             output[j++] = byte;  // Repeated byte
-            output[j++] = count; // Count
+            output[j++] = count; // Count (guaranteed to be > 0)
+            i += count;
         } else {
-            // Copy literal bytes efficiently
-            while (count > 0) {
-                if (byte == 0xFF) {
+            // Copy literal bytes
+            for (int k = 0; k < count; k++) {
+                if (input[i] == 0xFF) {
                     // Escape the RLE marker
                     if (j + 2 > output_len) return -1;
                     output[j++] = 0xFF;
                     output[j++] = 0x00;  // Escaped marker
                 } else {
                     if (j + 1 > output_len) return -1;
-                    output[j++] = byte;
+                    output[j++] = input[i];
                 }
-                count--;
-                if (count > 0) {
-                    i++;
-                    if (i < input_len) byte = input[i];
-                }
+                i++;
             }
         }
-        
-        i += (count == 0) ? 1 : count;
     }
     
     CCVFS_DEBUG("RLE compressed %d bytes to %d bytes (%.1f%%)", 

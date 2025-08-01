@@ -77,6 +77,10 @@ int ccvfsIoClose(sqlite3_file *pFile) {
  * Get block number from file offset
  */
 static uint32_t getBlockNumber(sqlite3_int64 offset, uint32_t blockSize) {
+    if (blockSize == 0) {
+        CCVFS_ERROR("Block size is zero, using default");
+        blockSize = CCVFS_DEFAULT_BLOCK_SIZE;
+    }
     return (uint32_t)(offset / blockSize);
 }
 
@@ -84,6 +88,10 @@ static uint32_t getBlockNumber(sqlite3_int64 offset, uint32_t blockSize) {
  * Get offset within block
  */
 static uint32_t getBlockOffset(sqlite3_int64 offset, uint32_t blockSize) {
+    if (blockSize == 0) {
+        CCVFS_ERROR("Block size is zero, using default");
+        blockSize = CCVFS_DEFAULT_BLOCK_SIZE;
+    }
     return (uint32_t)(offset % blockSize);
 }
 
@@ -218,8 +226,37 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
         return p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
     }
     
+    // For CCVFS files, check if we have any actual data yet
+    sqlite3_int64 physicalSize;
+    rc = p->pReal->pMethods->xFileSize(p->pReal, &physicalSize);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+    
+    // If physical file is empty or too small, this is a read from an empty database
+    if (physicalSize == 0 || (iOfst == 0 && physicalSize < CCVFS_HEADER_SIZE)) {
+        CCVFS_DEBUG("Reading from empty CCVFS file, returning SQLITE_IOERR_SHORT_READ");
+        return SQLITE_IOERR_SHORT_READ;
+    }
+    
+    // For CCVFS files, ensure header is loaded
+    if (!p->header_loaded) {
+        // Try to load existing header
+        rc = ccvfs_load_header(p);
+        if (rc != SQLITE_OK) {
+            CCVFS_DEBUG("Failed to load header, treating as empty file");
+            return SQLITE_IOERR_SHORT_READ;
+        }
+    }
+    
     // CCVFS file - use block-based reading
     uint32_t blockSize = p->header.block_size;
+    if (blockSize == 0) {
+        CCVFS_ERROR("Invalid block size in header, using default");
+        blockSize = CCVFS_DEFAULT_BLOCK_SIZE;
+        p->header.block_size = blockSize;
+    }
+    
     uint32_t startBlock = getBlockNumber(iOfst, blockSize);
     uint32_t startOffset = getBlockOffset(iOfst, blockSize);
     
@@ -425,6 +462,12 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
     
     // CCVFS file - use block-based writing
     uint32_t blockSize = p->header.block_size;
+    if (blockSize == 0) {
+        CCVFS_ERROR("Invalid block size in header, using default");
+        blockSize = CCVFS_DEFAULT_BLOCK_SIZE;
+        p->header.block_size = blockSize;
+    }
+    
     uint32_t startBlock = getBlockNumber(iOfst, blockSize);
     uint32_t startOffset = getBlockOffset(iOfst, blockSize);
     
@@ -554,8 +597,25 @@ int ccvfsIoFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize) {
         return p->pReal->pMethods->xFileSize(p->pReal, pSize);
     }
     
-    // CCVFS file - return logical file size based on block structure
-    *pSize = (sqlite3_int64)p->header.database_size_pages * p->header.block_size;
+    // For CCVFS files, ensure header is loaded
+    if (!p->header_loaded) {
+        // For new files that haven't been initialized yet, initialize the header
+        int rc = ccvfs_init_header(p, p->pOwner);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to initialize header for file size: %d", rc);
+            return rc;
+        }
+    }
+    
+    // Return logical file size based on block structure
+    uint32_t blockSize = p->header.block_size;
+    if (blockSize == 0) {
+        CCVFS_ERROR("Invalid block size in header, using default");
+        blockSize = CCVFS_DEFAULT_BLOCK_SIZE;
+        p->header.block_size = blockSize;
+    }
+    
+    *pSize = (sqlite3_int64)p->header.database_size_pages * blockSize;
     
     CCVFS_VERBOSE("CCVFS file size: %lld bytes", *pSize);
     return SQLITE_OK;
