@@ -18,6 +18,8 @@ if(ENABLE_VERBOSE)
     add_definitions(-DVERBOSE)
 endif()
 
+find_package(ZLIB REQUIRED)
+
 # 包含目录
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sqlite3)
@@ -39,10 +41,15 @@ set(CCVFS_SRC
 
 # 主库
 add_library(sqlitecc STATIC ${SQLITE3_SRC} ${CCVFS_SRC})
+target_link_libraries(sqlitecc ZLIB::ZLIB)
 
 # 测试程序
 add_executable(test_main test/main.c)
 target_link_libraries(test_main sqlitecc)
+
+# 算法测试程序
+add_executable(algorithm_test test/algorithm_test.c)
+target_link_libraries(algorithm_test sqlitecc)
 
 # 大型数据库测试程序
 add_executable(large_db_test test/large_db_test.c)
@@ -55,6 +62,18 @@ target_link_libraries(large_db_test_utf8 sqlitecc)
 # 大型数据库测试程序 (使用zlib)
 add_executable(large_db_zlib_test test/large_db_zlib_test.c)
 target_link_libraries(large_db_zlib_test sqlitecc)
+
+# 真正的zlib压缩测试程序
+add_executable(real_zlib_test test/real_zlib_test.c)
+target_link_libraries(real_zlib_test sqlitecc)
+
+# 简单的压缩算法对比测试
+add_executable(simple_zlib_test test/simple_zlib_test.c)
+target_link_libraries(simple_zlib_test sqlitecc)
+
+# 只测试zlib压缩
+add_executable(zlib_only_test test/zlib_only_test.c)
+target_link_libraries(zlib_only_test sqlitecc)
 
 # Shell程序
 add_executable(shell src/shell.c)

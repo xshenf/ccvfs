@@ -2,6 +2,7 @@
 #include <string.h>
 #include <sqlite3.h>
 #include "../include/compress_vfs.h"
+#include "zlib.h"
 
 int main(int argc, char **argv) {
     sqlite3 *db;

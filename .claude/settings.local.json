@@ -7,7 +7,20 @@
       "Bash(cmake ..)",
       "Bash(make)",
       "Bash(find E:workspacesqlitecc -name \"*.h\" -o -name \"*.c\")",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(./cmake-build-debug/algorithm_test.exe)",
+      "Bash(./cmake-build-debug/test_main.exe)",
+      "Bash(./cmake-build-debug/large_db_zlib_test.exe)",
+      "Bash(./cmake-build-debug/large_db_test.exe)",
+      "Bash(./cmake-build-debug/large_db_test_utf8.exe)",
+      "Bash(gcc:*)",
+      "Bash(pacman:*)",
+      "Bash(find:*)",
+      "Bash(pkg-config:*)",
+      "Bash(cmake:*)",
+      "Bash(./cmake-build-debug/real_zlib_test.exe)",
+      "Bash(./cmake-build-debug/simple_zlib_test.exe)",
+      "Bash(./cmake-build-debug/zlib_only_test.exe)"
     ],
     "deny": []
   }

@@ -1,4 +1,5 @@
 #include "ccvfs_algorithm.h"
+#include <zlib.h>
 
 // Global algorithm registries
 CompressAlgorithm *g_compress_algorithms[CCVFS_MAX_ALGORITHMS];
@@ -122,6 +123,13 @@ static int rle_decompress(const unsigned char *input, int input_len,
         return -1;
     }
     
+    // Debug: Print first few bytes of input
+    CCVFS_DEBUG("First 20 bytes of input: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x", 
+                input[0], input[1], input[2], input[3], input[4], 
+                input[5], input[6], input[7], input[8], input[9],
+                input[10], input[11], input[12], input[13], input[14],
+                input[15], input[16], input[17], input[18], input[19]);
+    
     while (i < input_len && j < output_len) {
         if (input[i] == 0xFF) {
             if (i + 1 >= input_len) {
@@ -137,14 +145,24 @@ static int rle_decompress(const unsigned char *input, int input_len,
                 }
                 output[j++] = 0xFF;
                 i += 2;
-            } else if (i + 2 < input_len) {
+                CCVFS_DEBUG("Decoded escaped 0xFF at position %d", i-2);
+            } else if (i + 2 < input_len) {  // Need at least 3 bytes: marker + byte + count
                 // RLE sequence
                 unsigned char byte = input[i + 1];
                 int count = input[i + 2];
                 
+                CCVFS_DEBUG("RLE sequence at position %d: byte=0x%02x, count=%d", i, byte, count);
+                
                 if (count == 0) {
-                    CCVFS_ERROR("Invalid RLE count of 0");
-                    return -1;
+                    CCVFS_ERROR("Invalid RLE count of 0 at position %d", i);
+                    CCVFS_ERROR("This may indicate data corruption or encryption/decryption issue");
+                    // Try to continue by treating this as a literal 0xFF
+                    if (j >= output_len) {
+                        CCVFS_ERROR("Output buffer overflow in RLE decompression");
+                        return -1;
+                    }
+                    output[j++] = input[i++];
+                    continue;
                 }
                 
                 if (j + count > output_len) {
@@ -158,8 +176,13 @@ static int rle_decompress(const unsigned char *input, int input_len,
                 }
                 i += 3;
             } else {
-                CCVFS_ERROR("Incomplete RLE sequence at end of input");
-                break;
+                CCVFS_ERROR("Incomplete RLE sequence at end of input: need 3 bytes, have %d", input_len - i);
+                // Treat as literal byte
+                if (j >= output_len) {
+                    CCVFS_ERROR("Output buffer overflow in RLE decompression");
+                    return -1;
+                }
+                output[j++] = input[i++];
             }
         } else {
             if (j >= output_len) {
@@ -424,65 +447,47 @@ static int lz4_get_max_compressed_size(int input_len) {
 }
 
 /*
- * Zlib-compatible compression (using a simple deflate-like algorithm)
+ * Real Zlib Compression Algorithm using actual zlib library
  */
 static int zlib_compress(const unsigned char *input, int input_len, 
                         unsigned char *output, int output_len, int level) {
-    // For now, implement a simple compression that's compatible with existing tests
-    // This is a placeholder - in production, you'd use actual zlib
-    CCVFS_DEBUG("Zlib compressing %d bytes (level %d)", input_len, level);
+    CCVFS_DEBUG("Real Zlib compressing %d bytes (level %d)", input_len, level);
     
-    if (output_len < input_len + 16) {
-        CCVFS_ERROR("Output buffer too small for Zlib compression");
+    // Set compression level (default to 6 if invalid)
+    if (level < 1 || level > 9) level = 6;
+    
+    uLongf dest_len = output_len;
+    int result = compress2(output, &dest_len, input, input_len, level);
+    
+    if (result != Z_OK) {
+        CCVFS_ERROR("Zlib compression failed with error %d", result);
         return -1;
     }
     
-    // Simple run-length encoding with zlib-like header
-    output[0] = 0x78;  // Zlib header
-    output[1] = 0x9C;  // Default compression
-    
-    int compressed_size = rle_compress(input, input_len, output + 2, output_len - 6, level);
-    if (compressed_size < 0) return compressed_size;
-    
-    // Add simple checksum (Adler-32 compatible)
-    uint32_t checksum = 1;  // Simplified checksum
-    for (int i = 0; i < input_len; i++) {
-        checksum = (checksum + input[i]) % 65521;
-    }
-    
-    output[compressed_size + 2] = (checksum >> 24) & 0xFF;
-    output[compressed_size + 3] = (checksum >> 16) & 0xFF;
-    output[compressed_size + 4] = (checksum >> 8) & 0xFF;
-    output[compressed_size + 5] = checksum & 0xFF;
-    
-    CCVFS_DEBUG("Zlib compressed %d bytes to %d bytes", input_len, compressed_size + 6);
-    return compressed_size + 6;
+    CCVFS_DEBUG("Real Zlib compressed %d bytes to %lu bytes (%.1f%%)", 
+                input_len, dest_len, (double)dest_len / input_len * 100.0);
+    return (int)dest_len;
 }
 
 static int zlib_decompress(const unsigned char *input, int input_len,
                           unsigned char *output, int output_len) {
-    CCVFS_DEBUG("Zlib decompressing %d bytes", input_len);
+    CCVFS_DEBUG("Real Zlib decompressing %d bytes", input_len);
     
-    if (input_len < 6) {
-        CCVFS_ERROR("Input too small for Zlib format");
+    uLongf dest_len = output_len;
+    int result = uncompress(output, &dest_len, input, input_len);
+    
+    if (result != Z_OK) {
+        CCVFS_ERROR("Zlib decompression failed with error %d", result);
         return -1;
     }
     
-    // Check zlib header
-    if (input[0] != 0x78) {
-        CCVFS_ERROR("Invalid Zlib header");
-        return -1;
-    }
-    
-    // Decompress the data (skip header and checksum)
-    int result = rle_decompress(input + 2, input_len - 6, output, output_len);
-    
-    CCVFS_DEBUG("Zlib decompressed %d bytes to %d bytes", input_len, result);
-    return result;
+    CCVFS_DEBUG("Real Zlib decompressed %d bytes to %lu bytes", input_len, dest_len);
+    return (int)dest_len;
 }
 
 static int zlib_get_max_compressed_size(int input_len) {
-    return input_len + input_len/8 + 32;
+    // Use zlib's recommended formula for maximum compressed size
+    return compressBound(input_len);
 }
 
 // Add the new algorithm instances after the original ones
