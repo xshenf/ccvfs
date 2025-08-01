@@ -20,6 +20,30 @@ endif()
 
 find_package(ZLIB REQUIRED)
 
+# 尝试查找其他压缩库
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(LZ4 QUIET liblz4)
+    pkg_check_modules(LZMA QUIET liblzma)
+    pkg_check_modules(BROTLI QUIET libbrotlidec libbrotlienc)
+endif()
+
+# 手动查找LZ4库
+find_path(LZ4_INCLUDE_DIR lz4.h)
+find_library(LZ4_LIBRARY lz4)
+if(LZ4_INCLUDE_DIR AND LZ4_LIBRARY)
+    set(LZ4_FOUND TRUE)
+    message(STATUS "Found LZ4: ${LZ4_LIBRARY}")
+endif()
+
+# 手动查找LZMA库
+find_path(LZMA_INCLUDE_DIR lzma.h)
+find_library(LZMA_LIBRARY lzma)
+if(LZMA_INCLUDE_DIR AND LZMA_LIBRARY)
+    set(LZMA_FOUND TRUE)
+    message(STATUS "Found LZMA: ${LZMA_LIBRARY}")
+endif()
+
 # 包含目录
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/sqlite3)
@@ -43,37 +67,27 @@ set(CCVFS_SRC
 add_library(sqlitecc STATIC ${SQLITE3_SRC} ${CCVFS_SRC})
 target_link_libraries(sqlitecc ZLIB::ZLIB)
 
-# 测试程序
-add_executable(test_main test/main.c)
-target_link_libraries(test_main sqlitecc)
+# 根据找到的库添加支持
+if(LZ4_FOUND)
+    target_include_directories(sqlitecc PRIVATE ${LZ4_INCLUDE_DIR})
+    target_link_libraries(sqlitecc ${LZ4_LIBRARY})
+    target_compile_definitions(sqlitecc PRIVATE HAVE_LZ4)
+    message(STATUS "LZ4 support enabled")
+endif()
 
-# 算法测试程序
-add_executable(algorithm_test test/algorithm_test.c)
-target_link_libraries(algorithm_test sqlitecc)
+if(LZMA_FOUND)
+    target_include_directories(sqlitecc PRIVATE ${LZMA_INCLUDE_DIR})
+    target_link_libraries(sqlitecc ${LZMA_LIBRARY})
+    target_compile_definitions(sqlitecc PRIVATE HAVE_LZMA)
+    message(STATUS "LZMA support enabled")
+endif()
 
-# 大型数据库测试程序
-add_executable(large_db_test test/large_db_test.c)
-target_link_libraries(large_db_test sqlitecc)
+# Essential test programs
+add_executable(simple_test test/simple_test.c)
+target_link_libraries(simple_test sqlitecc)
 
-# 大型数据库测试程序 (UTF-8版本)
-add_executable(large_db_test_utf8 test/large_db_test_utf8.c)
-target_link_libraries(large_db_test_utf8 sqlitecc)
-
-# 大型数据库测试程序 (使用zlib)
-add_executable(large_db_zlib_test test/large_db_zlib_test.c)
-target_link_libraries(large_db_zlib_test sqlitecc)
-
-# 真正的zlib压缩测试程序
-add_executable(real_zlib_test test/real_zlib_test.c)
-target_link_libraries(real_zlib_test sqlitecc)
-
-# 简单的压缩算法对比测试
-add_executable(simple_zlib_test test/simple_zlib_test.c)
-target_link_libraries(simple_zlib_test sqlitecc)
-
-# 只测试zlib压缩
-add_executable(zlib_only_test test/zlib_only_test.c)
-target_link_libraries(zlib_only_test sqlitecc)
+add_executable(compression_ratio_test test/compression_ratio_test.c)
+target_link_libraries(compression_ratio_test sqlitecc)
 
 # Shell程序
 add_executable(shell src/shell.c)

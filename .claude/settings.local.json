@@ -20,7 +20,14 @@
       "Bash(cmake:*)",
       "Bash(./cmake-build-debug/real_zlib_test.exe)",
       "Bash(./cmake-build-debug/simple_zlib_test.exe)",
-      "Bash(./cmake-build-debug/zlib_only_test.exe)"
+      "Bash(./cmake-build-debug/zlib_only_test.exe)",
+      "Bash(./real_compression_test.exe)",
+      "Bash(./zlib_only_test.exe)",
+      "Bash(./library_check_test.exe)",
+      "Bash(./safe_compression_test.exe)",
+      "Bash(rm:*)",
+      "Bash(./basic_test.exe)",
+      "Bash(./simple_test.exe)"
     ],
     "deny": []
   }
