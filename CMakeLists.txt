@@ -30,6 +30,11 @@ set(SQLITE3_SRC
 # 压缩VFS源文件
 set(CCVFS_SRC 
     src/compress_vfs.c
+    src/ccvfs_core.c
+    src/ccvfs_io.c  
+    src/ccvfs_algorithm.c
+    src/ccvfs_block.c
+    src/ccvfs_utils.c
 )
 
 # 主库
