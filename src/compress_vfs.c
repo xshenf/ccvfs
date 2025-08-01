@@ -318,8 +318,88 @@ static int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3
         return result;
     }
     
-    // For now, we still call the underlying VFS's write method directly
-    // The real compression and encryption functionality will be implemented later
+    // Handle compression if a compression algorithm is set
+    if (pVfs->pCompressAlg) {
+        // Calculate block number based on offset
+        sqlite3_int64 blockNumber = iOfst / CCVFS_DEFAULT_BLOCK_SIZE;
+        sqlite3_int64 blockOffset = iOfst % CCVFS_DEFAULT_BLOCK_SIZE;
+        
+        CCVFS_DEBUG("Compressing data for block #%lld, offset within block=%lld, data size=%d", 
+                    blockNumber, blockOffset, iAmt);
+        
+        // Ensure the data size matches the expected block size
+        if (iAmt <= CCVFS_DEFAULT_BLOCK_SIZE) {
+            // Allocate buffer for compressed data (slightly larger than original for worst-case scenario)
+            int maxCompressedSize = iAmt + iAmt / 10 + 100; // Add some extra space
+            unsigned char *compressedBuffer = sqlite3_malloc(
+                CCVFS_HEADER_SIZE + 2 * sizeof(int) + maxCompressedSize);
+            
+            if (!compressedBuffer) {
+                CCVFS_ERROR("Failed to allocate memory for compression buffer");
+                return SQLITE_NOMEM;
+            }
+            
+            // Compress the data
+            int compressedSize = pVfs->pCompressAlg->compress(
+                (const unsigned char*)zBuf, iAmt,
+                compressedBuffer + CCVFS_HEADER_SIZE + 2 * sizeof(int),
+                maxCompressedSize);
+            
+            if (compressedSize < 0) {
+                CCVFS_ERROR("Compression failed with error code: %d", compressedSize);
+                sqlite3_free(compressedBuffer);
+                return SQLITE_ERROR;
+            }
+            
+            CCVFS_DEBUG("Compression successful: original size=%d, compressed size=%d", iAmt, compressedSize);
+            
+            // If compression didn't reduce size, store original data
+            if (compressedSize >= iAmt) {
+                CCVFS_DEBUG("Compressed size not smaller than original, storing original data");
+                compressedSize = iAmt;
+                memcpy(compressedBuffer + CCVFS_HEADER_SIZE + 2 * sizeof(int), zBuf, iAmt);
+            }
+            
+            // Prepare block header
+            unsigned int *header = (unsigned int*)compressedBuffer;
+            header[0] = 0x12345678; // Magic number
+            header[1] = (unsigned int)blockNumber;
+            header[2] = 0; // Checksum - to be implemented
+            header[3] = (compressedSize < iAmt) ? 1 : 0; // Flag indicating if data is compressed
+            
+            // Add length fields
+            int *lengthFields = (int*)(compressedBuffer + CCVFS_HEADER_SIZE);
+            lengthFields[0] = compressedSize; // Compressed data length
+            lengthFields[1] = iAmt; // Original data length
+            
+            // Write the compressed block to the file
+            // Calculate physical offset - for now we'll just write sequentially
+            // In a full implementation, we would need to maintain a mapping between logical and physical blocks
+            sqlite3_int64 physicalOffset = blockNumber * (CCVFS_HEADER_SIZE + 2 * sizeof(int) + CCVFS_DEFAULT_BLOCK_SIZE);
+            
+            int result = p->pReal->pMethods->xWrite(
+                p->pReal, 
+                compressedBuffer, 
+                CCVFS_HEADER_SIZE + 2 * sizeof(int) + compressedSize, 
+                physicalOffset);
+            
+            sqlite3_free(compressedBuffer);
+            
+            if (result == SQLITE_OK) {
+                CCVFS_DEBUG("Compressed block written successfully");
+            } else {
+                CCVFS_ERROR("Failed to write compressed block: %d", result);
+            }
+            
+            return result;
+        } else {
+            CCVFS_ERROR("Data size exceeds block size: %d > %d", iAmt, CCVFS_DEFAULT_BLOCK_SIZE);
+            return SQLITE_ERROR;
+        }
+    }
+    
+    // For now, we still call the underlying VFS's write method directly for other cases
+    // The real encryption functionality will be implemented later
     int result = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
     
     if (result == SQLITE_OK) {

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find . -name \"*.c\" -o -name \"*.h\")"
+    ],
+    "deny": []
+  },
+  "$schema": "https://json.schemastore.org/claude-code-settings.json"
+}
