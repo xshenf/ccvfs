@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
     
     // 创建压缩加密VFS
     printf("Creating compressed VFS...\n");
-    rc = sqlite3_ccvfs_create("ccvfs", NULL, "rle", "xor");
+    rc = sqlite3_ccvfs_create("ccvfs", NULL, "rle", "xor", CCVFS_CREATE_REALTIME);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "Failed to create compressed VFS: %d\n", rc);
         return 1;

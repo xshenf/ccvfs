@@ -46,7 +46,7 @@ int sqlite3_activate_ccvfs(const char *zCompressType, const char *zEncryptType) 
     }
     
     /* 创建并注册VFS */
-    int rc = sqlite3_ccvfs_create("ccvfs", NULL, zCompressType, zEncryptType);
+    int rc = sqlite3_ccvfs_create("ccvfs", NULL, zCompressType, zEncryptType, CCVFS_CREATE_REALTIME);
     if (rc != SQLITE_OK) {
         return rc;
     }
@@ -103,39 +103,3 @@ void sqlite3_activate_cerod(const char *zParms) {
     }
 }
 
-/*
-** 创建CCVFS
-*/
-int sqlite3_ccvfs_create(
-    const char *zVfsName,
-    sqlite3_vfs *pRootVfs,
-    const char *zCompressType,
-    const char *zEncryptType
-) {
-    /* 简化实现，实际项目中需要完整实现 */
-    return SQLITE_OK;
-}
-
-/*
-** 销毁CCVFS
-*/
-int sqlite3_ccvfs_destroy(const char *zVfsName) {
-    /* 简化实现，实际项目中需要完整实现 */
-    return SQLITE_OK;
-}
-
-/*
-** 注册自定义压缩算法
-*/
-int sqlite3_ccvfs_register_compress_algorithm(CompressAlgorithm *algorithm) {
-    /* 简化实现，实际项目中需要完整实现 */
-    return SQLITE_OK;
-}
-
-/*
-** 注册自定义加密算法
-*/
-int sqlite3_ccvfs_register_encrypt_algorithm(EncryptAlgorithm *algorithm) {
-    /* 简化实现，实际项目中需要完整实现 */
-    return SQLITE_OK;
-}

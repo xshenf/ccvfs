@@ -59,11 +59,11 @@ int main(int argc, char **argv) {
     
     // 创建压缩加密VFS，使用zlib算法
     printf("Creating compressed VFS with zlib...\n");
-    rc = sqlite3_ccvfs_create("ccvfs", NULL, "zlib", "xor");
+    rc = sqlite3_ccvfs_create("ccvfs", NULL, "zlib", "xor", CCVFS_CREATE_REALTIME);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "Failed to create compressed VFS: %d\n", rc);
         // 如果zlib不可用，尝试使用默认算法
-        rc = sqlite3_ccvfs_create("ccvfs", NULL, "rle", "xor");
+        rc = sqlite3_ccvfs_create("ccvfs", NULL, "rle", "xor", CCVFS_CREATE_REALTIME);
         if (rc != SQLITE_OK) {
             fprintf(stderr, "Failed to create compressed VFS with any algorithm: %d\n", rc);
             return 1;
