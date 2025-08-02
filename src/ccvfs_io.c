@@ -99,10 +99,11 @@ static uint32_t getBlockOffset(sqlite3_int64 offset, uint32_t blockSize) {
  * Read and decompress a block from file
  */
 static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer, uint32_t bufferSize) {
-    CCVFS_DEBUG("Reading block %u", blockNum);
+    CCVFS_DEBUG("=== READING BLOCK %u ===", blockNum);
     
     // Check if block index is loaded (should already be loaded in ccvfsOpen)
     if (!pFile->pBlockIndex) {
+        CCVFS_DEBUG("Block index not loaded, loading now");
         int rc = ccvfs_load_block_index(pFile);
         if (rc != SQLITE_OK) {
             CCVFS_ERROR("Failed to load block index: %d", rc);
@@ -112,15 +113,20 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
     
     // Check block number validity
     if (blockNum >= pFile->header.total_blocks) {
-        CCVFS_DEBUG("Block %u beyond total blocks %u, treating as zero", blockNum, pFile->header.total_blocks);
+        CCVFS_DEBUG("Block %u beyond total blocks %u, treating as zero (sparse)", 
+                   blockNum, pFile->header.total_blocks);
         memset(buffer, 0, bufferSize);
         return SQLITE_OK;
     }
     
     CCVFSBlockIndex *pIndex = &pFile->pBlockIndex[blockNum];
     
+    CCVFS_DEBUG("Block[%u] mapping: physical_offset=%llu, compressed_size=%u, original_size=%u, flags=0x%x",
+               blockNum, (unsigned long long)pIndex->physical_offset, 
+               pIndex->compressed_size, pIndex->original_size, pIndex->flags);
+    
     // If block has no physical storage (sparse), return zeros
-    if (pIndex->physical_offset == 0) {
+    if (pIndex->physical_offset == 0 || (pIndex->flags & CCVFS_BLOCK_SPARSE)) {
         CCVFS_DEBUG("Block %u is sparse, returning zeros", blockNum);
         memset(buffer, 0, bufferSize);
         return SQLITE_OK;
@@ -218,7 +224,7 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
     int bytesRead = 0;
     int rc;
     
-    CCVFS_DEBUG("Reading %d bytes at offset %lld", iAmt, iOfst);
+    CCVFS_DEBUG("=== READING %d bytes at offset %lld ===", iAmt, iOfst);
     
     // If not a CCVFS file, read directly from underlying file
     if (!p->is_ccvfs_file) {
@@ -233,6 +239,8 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
         return rc;
     }
     
+    CCVFS_DEBUG("Physical file size: %lld bytes", physicalSize);
+    
     // If physical file is empty or too small, this is a read from an empty database
     if (physicalSize == 0 || (iOfst == 0 && physicalSize < CCVFS_HEADER_SIZE)) {
         CCVFS_DEBUG("Reading from empty CCVFS file, returning SQLITE_IOERR_SHORT_READ");
@@ -242,6 +250,7 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
     // For CCVFS files, ensure header is loaded
     if (!p->header_loaded) {
         // Try to load existing header
+        CCVFS_DEBUG("Header not loaded, loading now");
         rc = ccvfs_load_header(p);
         if (rc != SQLITE_OK) {
             CCVFS_DEBUG("Failed to load header, treating as empty file");
@@ -260,6 +269,9 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
     uint32_t startBlock = getBlockNumber(iOfst, blockSize);
     uint32_t startOffset = getBlockOffset(iOfst, blockSize);
     
+    CCVFS_DEBUG("Block-based read: blockSize=%u, startBlock=%u, startOffset=%u", 
+               blockSize, startBlock, startOffset);
+    
     // Allocate block buffer
     unsigned char *blockBuffer = sqlite3_malloc(blockSize);
     if (!blockBuffer) {
@@ -276,6 +288,9 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
             bytesToRead = iAmt - bytesRead;
         }
         
+        CCVFS_DEBUG("Reading iteration: currentBlock=%u, currentOffset=%u, bytesToRead=%u", 
+                   currentBlock, currentOffset, bytesToRead);
+        
         // Read block
         rc = readBlock(p, currentBlock, blockBuffer, blockSize);
         if (rc != SQLITE_OK) {
@@ -287,6 +302,8 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
         // Copy data from block buffer
         memcpy(buffer + bytesRead, blockBuffer + currentOffset, bytesToRead);
         bytesRead += bytesToRead;
+        
+        CCVFS_DEBUG("Copied %u bytes, total read: %d/%d", bytesToRead, bytesRead, iAmt);
     }
     
     sqlite3_free(blockBuffer);
@@ -299,10 +316,13 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
  * Compress and write a block to file
  */
 static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *data, uint32_t dataSize) {
-    CCVFS_DEBUG("Writing block %u, size %u", blockNum, dataSize);
+    CCVFS_DEBUG("=== WRITING BLOCK %u ===", blockNum);
+    CCVFS_DEBUG("Block %u: writing %u bytes", blockNum, dataSize);
     
     // Ensure block index is large enough
     if (blockNum >= pFile->header.total_blocks) {
+        CCVFS_DEBUG("Need to expand block index from %u to %u", 
+                   pFile->header.total_blocks, blockNum + 1);
         int rc = ccvfs_expand_block_index(pFile, blockNum + 1);
         if (rc != SQLITE_OK) {
             CCVFS_ERROR("Failed to expand block index: %d", rc);
@@ -311,6 +331,10 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
     }
     
     CCVFSBlockIndex *pIndex = &pFile->pBlockIndex[blockNum];
+    
+    CCVFS_DEBUG("Block[%u] current mapping: physical_offset=%llu, compressed_size=%u, flags=0x%x",
+               blockNum, (unsigned long long)pIndex->physical_offset, 
+               pIndex->compressed_size, pIndex->flags);
     
     // Check if block is all zeros (sparse block optimization)
     int isZeroBlock = 1;
@@ -328,6 +352,18 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
         pIndex->original_size = dataSize;
         pIndex->checksum = 0;
         pIndex->flags = CCVFS_BLOCK_SPARSE;
+        
+        // Mark index as dirty but don't save immediately
+        pFile->index_dirty = 1;
+        
+        // Update logical database size for sparse blocks too
+        if (blockNum + 1 > pFile->header.database_size_pages) {
+            pFile->header.database_size_pages = blockNum + 1;
+            CCVFS_DEBUG("Database size updated to %u pages for sparse block", 
+                       pFile->header.database_size_pages);
+        }
+        
+        CCVFS_DEBUG("Block[%u] updated to sparse, index marked dirty", blockNum);
         return SQLITE_OK;
     }
     
@@ -392,7 +428,7 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
     // Calculate checksum
     uint32_t checksum = ccvfs_crc32(dataToWrite, compressedSize);
     
-    // Get file size to append new block
+    // Get file size to append new block (after reserved index table space)
     sqlite3_int64 fileSize;
     int rc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
     if (rc != SQLITE_OK) {
@@ -402,8 +438,13 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
         return rc;
     }
     
-    // Write block data at end of file
+    // Ensure we write data blocks after the reserved index table space
     sqlite3_int64 writeOffset = fileSize;
+    if (writeOffset < CCVFS_DATA_BLOCKS_OFFSET) {
+        writeOffset = CCVFS_DATA_BLOCKS_OFFSET;
+        CCVFS_DEBUG("Adjusting write offset to %llu (after reserved index space)", 
+                   (unsigned long long)writeOffset);
+    }
     rc = pFile->pReal->pMethods->xWrite(pFile->pReal, dataToWrite, compressedSize, writeOffset);
     if (rc != SQLITE_OK) {
         CCVFS_ERROR("Failed to write block data: %d", rc);
@@ -412,26 +453,31 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
         return rc;
     }
     
-    // Update block index
+    // Update block index entry
     pIndex->physical_offset = writeOffset;
     pIndex->compressed_size = compressedSize;
     pIndex->original_size = dataSize;
     pIndex->checksum = checksum;
     pIndex->flags = flags;
     
-    // Save block index immediately to ensure consistency
-    rc = ccvfs_save_block_index(pFile);
-    if (rc != SQLITE_OK) {
-        CCVFS_ERROR("Failed to save block index after writing block %u: %d", blockNum, rc);
-        // Don't return error here - data is written, just index save failed
-    }
+    // Mark index as dirty (will be saved on sync/close)
+    pFile->index_dirty = 1;
     
-    // Also save header to keep metadata in sync
-    rc = ccvfs_save_header(pFile);
-    if (rc != SQLITE_OK) {
-        CCVFS_ERROR("Failed to save header after writing block %u: %d", blockNum, rc);
-        // Don't return error here - data is written, just header save failed
+    // Update logical database size
+    uint32_t maxBlock = 0;
+    for (uint32_t i = 0; i < pFile->header.total_blocks; i++) {
+        if (pFile->pBlockIndex[i].physical_offset != 0) { // Non-sparse block
+            maxBlock = i + 1;
+        }
     }
+    pFile->header.database_size_pages = maxBlock;
+    
+    CCVFS_DEBUG("Block[%u] updated: physical_offset=%llu, compressed_size=%u, flags=0x%x",
+               blockNum, (unsigned long long)writeOffset, compressedSize, flags);
+    CCVFS_DEBUG("Database size updated to %u pages (%llu bytes)", 
+               pFile->header.database_size_pages, 
+               (unsigned long long)pFile->header.database_size_pages * pFile->header.block_size);
+    CCVFS_DEBUG("Index marked dirty, will be saved on next sync/close");
     
     // Clean up
     if (encryptedData) sqlite3_free(encryptedData);
@@ -450,10 +496,11 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
     int bytesWritten = 0;
     int rc;
     
-    CCVFS_DEBUG("Writing %d bytes at offset %lld", iAmt, iOfst);
+    CCVFS_DEBUG("=== WRITING %d bytes at offset %lld ===", iAmt, iOfst);
     
     // Initialize CCVFS header for new CCVFS files on first write
     if (p->is_ccvfs_file && !p->header_loaded && iOfst == 0) {
+        CCVFS_DEBUG("First write to new CCVFS file, initializing header");
         rc = ccvfs_init_header(p, p->pOwner);
         if (rc != SQLITE_OK) {
             CCVFS_ERROR("Failed to initialize CCVFS header: %d", rc);
@@ -466,6 +513,7 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
             CCVFS_ERROR("Failed to save CCVFS header: %d", rc);
             return rc;
         }
+        CCVFS_DEBUG("CCVFS header initialized and saved");
     }
     
     // If not a CCVFS file, write directly to underlying file
@@ -485,6 +533,11 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
     uint32_t startBlock = getBlockNumber(iOfst, blockSize);
     uint32_t startOffset = getBlockOffset(iOfst, blockSize);
     
+    CCVFS_DEBUG("Block-based write: blockSize=%u, startBlock=%u, startOffset=%u", 
+               blockSize, startBlock, startOffset);
+    CCVFS_DEBUG("Current mapping state: total_blocks=%u, index_dirty=%d", 
+               p->header.total_blocks, p->index_dirty);
+    
     // Allocate block buffer
     unsigned char *blockBuffer = sqlite3_malloc(blockSize);
     if (!blockBuffer) {
@@ -501,17 +554,24 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
             bytesToWrite = iAmt - bytesWritten;
         }
         
+        CCVFS_DEBUG("Writing iteration: currentBlock=%u, currentOffset=%u, bytesToWrite=%u", 
+                   currentBlock, currentOffset, bytesToWrite);
+        
         // If we're not writing a full block, read existing data first
         if (currentOffset != 0 || bytesToWrite != blockSize) {
+            CCVFS_DEBUG("Partial block write, reading existing data");
             rc = readBlock(p, currentBlock, blockBuffer, blockSize);
             if (rc != SQLITE_OK) {
                 // If block doesn't exist, fill with zeros
+                CCVFS_DEBUG("Block doesn't exist, filling with zeros");
                 memset(blockBuffer, 0, blockSize);
             }
         }
         
         // Copy new data into block buffer
         memcpy(blockBuffer + currentOffset, data + bytesWritten, bytesToWrite);
+        
+        CCVFS_DEBUG("Modified block buffer, writing block %u", currentBlock);
         
         // Write modified block
         rc = writeBlock(p, currentBlock, blockBuffer, blockSize);
@@ -522,10 +582,14 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
         }
         
         bytesWritten += bytesToWrite;
+        
+        CCVFS_DEBUG("Wrote %u bytes, total written: %d/%d", bytesToWrite, bytesWritten, iAmt);
     }
     
     sqlite3_free(blockBuffer);
     
+    CCVFS_DEBUG("Write complete: index_dirty=%d, total_blocks=%u", 
+               p->index_dirty, p->header.total_blocks);
     CCVFS_VERBOSE("Successfully wrote %d bytes to offset %lld", iAmt, iOfst);
     return SQLITE_OK;
 }

@@ -22,6 +22,9 @@ int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile,
     pCcvfsFile->open_flags = flags;
     pCcvfsFile->is_ccvfs_file = 0;  // Default to non-CCVFS file
     pCcvfsFile->header_loaded = 0;
+    pCcvfsFile->pBlockIndex = NULL;
+    pCcvfsFile->index_dirty = 0;
+    pCcvfsFile->index_capacity = 0;
     
     // Allocate space for the real file structure
     pRealFile = (sqlite3_file*)&pCcvfsFile[1];

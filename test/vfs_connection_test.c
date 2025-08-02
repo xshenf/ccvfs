@@ -33,8 +33,20 @@ int test_vfs_connection() {
     
     printf("✅ Database opened successfully\n");
     
-    // Create table
+    // Set page size to 64KB to match CCVFS block size for optimal performance
     char *err_msg = NULL;
+    rc = sqlite3_exec(db, "PRAGMA page_size=65536;", 0, 0, &err_msg);
+    if (rc != SQLITE_OK) {
+        printf("❌ Failed to set page size: %s\n", err_msg);
+        sqlite3_free(err_msg);
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("test_vfs");
+        return 0;
+    }
+    
+    printf("✅ Page size set to 64KB\n");
+    
+    // Create table
     rc = sqlite3_exec(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, text TEXT);", 0, 0, &err_msg);
     if (rc != SQLITE_OK) {
         printf("❌ Table creation failed: %s\n", err_msg);

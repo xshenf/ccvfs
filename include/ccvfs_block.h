@@ -14,6 +14,7 @@ int ccvfs_load_header(CCVFSFile *pFile);
 int ccvfs_save_header(CCVFSFile *pFile);
 int ccvfs_load_block_index(CCVFSFile *pFile);
 int ccvfs_save_block_index(CCVFSFile *pFile);
+int ccvfs_force_save_block_index(CCVFSFile *pFile); /* Force save even if not dirty */
 int ccvfs_init_header(CCVFSFile *pFile, CCVFS *pVfs);
 int ccvfs_expand_block_index(CCVFSFile *pFile, uint32_t new_block_count);
 

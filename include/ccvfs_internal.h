@@ -18,13 +18,13 @@ extern "C" {
 
 // Debug macro definitions
 #ifdef DEBUG
-#define CCVFS_DEBUG(fmt, ...) fprintf(stderr, "[CCVFS DEBUG] %s:%d: " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
+#define CCVFS_DEBUG(fmt, ...) fprintf(stdout, "[CCVFS DEBUG] %s:%d: " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
 #else
 #define CCVFS_DEBUG(fmt, ...)
 #endif
 
 #ifdef VERBOSE
-#define CCVFS_VERBOSE(fmt, ...) fprintf(stderr, "[CCVFS VERBOSE] %s:%d: " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
+#define CCVFS_VERBOSE(fmt, ...) fprintf(stdout, "[CCVFS VERBOSE] %s:%d: " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
 #else
 #define CCVFS_VERBOSE(fmt, ...)
 #endif
@@ -53,7 +53,9 @@ typedef struct CCVFSFile {
     sqlite3_file *pReal;        /* Actual file pointer */
     CCVFS *pOwner;              /* Owner VFS */
     CCVFSFileHeader header;     /* Cached file header */
-    CCVFSBlockIndex *pBlockIndex; /* Block index table */
+    CCVFSBlockIndex *pBlockIndex; /* Block index table (in-memory) */
+    int index_dirty;              /* 1 if index needs to be saved */
+    uint32_t index_capacity;      /* Allocated capacity for block index */
     int header_loaded;          /* Header loaded flag */
     int open_flags;             /* File open flags */
     int is_ccvfs_file;          /* Is this a CCVFS format file */

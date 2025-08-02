@@ -18,6 +18,12 @@ extern "C" {
 #define CCVFS_DEFAULT_BLOCK_SIZE (64 * 1024)  // 64KB blocks
 #define CCVFS_MAX_ALGORITHM_NAME 12
 
+// File layout constants
+#define CCVFS_MAX_BLOCKS 65536  // Maximum blocks supported (2^16)
+#define CCVFS_INDEX_TABLE_SIZE (CCVFS_MAX_BLOCKS * 24)  // 24 bytes per block index
+#define CCVFS_INDEX_TABLE_OFFSET CCVFS_HEADER_SIZE  // Fixed position after header
+#define CCVFS_DATA_BLOCKS_OFFSET (CCVFS_INDEX_TABLE_OFFSET + CCVFS_INDEX_TABLE_SIZE)  // Start of data blocks
+
 // Block flags
 #define CCVFS_BLOCK_COMPRESSED   (1 << 0)
 #define CCVFS_BLOCK_ENCRYPTED    (1 << 1) 
