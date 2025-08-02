@@ -494,3 +494,199 @@ void sqlite3_activate_cerod(const char *zParms) {
         sqlite3_free(zCopy);
     }
 }
+
+/*
+ * Compress an existing SQLite database with custom block size
+ */
+int sqlite3_ccvfs_compress_database_with_block_size(
+    const char *source_db,
+    const char *compressed_db,
+    const char *compress_algorithm,
+    const char *encrypt_algorithm,
+    uint32_t block_size,
+    int compression_level
+) {
+    sqlite3 *source = NULL;
+    sqlite3 *target = NULL;
+    FILE *source_file = NULL;
+    FILE *target_file = NULL;
+    int rc = SQLITE_OK;
+    long source_size, target_size;
+    CCVFSFileHeader header;
+    time_t start_time, end_time;
+    
+    printf("开始压缩数据库 (块大小: %u KB)...\n", block_size / 1024);
+    printf("源文件: %s\n", source_db);
+    printf("目标文件: %s\n", compressed_db);
+    printf("压缩算法: %s\n", compress_algorithm ? compress_algorithm : "none");
+    printf("加密算法: %s\n", encrypt_algorithm ? encrypt_algorithm : "none");
+    printf("块大小: %u 字节 (%u KB)\n", block_size, block_size / 1024);
+    printf("压缩等级: %d\n", compression_level);
+    
+    start_time = time(NULL);
+    
+    // Validate block size
+    if (block_size < CCVFS_MIN_BLOCK_SIZE || block_size > CCVFS_MAX_BLOCK_SIZE) {
+        printf("错误: 无效的块大小 %u (必须在 %u - %u 之间)\n", 
+               block_size, CCVFS_MIN_BLOCK_SIZE, CCVFS_MAX_BLOCK_SIZE);
+        return SQLITE_ERROR;
+    }
+    
+    if ((block_size & (block_size - 1)) != 0) {
+        printf("错误: 块大小必须是2的幂: %u\n", block_size);
+        return SQLITE_ERROR;
+    }
+    
+    // Check if source database exists
+    if (!file_exists(source_db)) {
+        printf("错误: 源数据库文件不存在: %s\n", source_db);
+        return SQLITE_ERROR;
+    }
+    
+    source_size = get_file_size(source_db);
+    if (source_size <= 0) {
+        printf("错误: 无法获取源文件大小\n");
+        return SQLITE_ERROR;
+    }
+    
+    printf("源文件大小: %ld 字节\n", source_size);
+    
+    // Create CCVFS for compression with custom block size
+    rc = sqlite3_ccvfs_create_with_block_size("compress_vfs_custom", NULL, 
+                                              compress_algorithm, encrypt_algorithm, 
+                                              block_size, CCVFS_CREATE_OFFLINE);
+    if (rc != SQLITE_OK) {
+        printf("错误: 创建压缩VFS失败: %d\n", rc);
+        return rc;
+    }
+    
+    // Open source database in read-only mode
+    rc = sqlite3_open_v2(source_db, &source, SQLITE_OPEN_READONLY, NULL);
+    if (rc != SQLITE_OK) {
+        printf("错误: 打开源数据库失败: %s\n", sqlite3_errmsg(source));
+        goto cleanup;
+    }
+    
+    // Create and open target database with custom CCVFS
+    rc = sqlite3_open_v2(compressed_db, &target, 
+                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 
+                         "compress_vfs_custom");
+    if (rc != SQLITE_OK) {
+        printf("错误: 创建压缩数据库失败: %s\n", sqlite3_errmsg(target));
+        goto cleanup;
+    }
+    
+    // Copy database schema and data
+    printf("正在复制数据库结构和数据...\n");
+    
+    // Use SQLite backup API for efficient copying
+    sqlite3_backup *backup = sqlite3_backup_init(target, "main", source, "main");
+    if (!backup) {
+        printf("错误: 初始化备份失败\n");
+        rc = SQLITE_ERROR;
+        goto cleanup;
+    }
+    
+    int pages_remaining, total_pages = 0;
+    do {
+        rc = sqlite3_backup_step(backup, 100);  // Copy 100 pages at a time
+        pages_remaining = sqlite3_backup_remaining(backup);
+        if (total_pages == 0) {
+            total_pages = sqlite3_backup_pagecount(backup);
+        }
+        
+        if (total_pages > 0) {
+            printf("\r进度: %.1f%% (%d/%d 页)", 
+                   (double)(total_pages - pages_remaining) * 100.0 / total_pages,
+                   total_pages - pages_remaining, total_pages);
+            fflush(stdout);
+        }
+        
+    } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+    
+    printf("\n");
+    
+    if (rc != SQLITE_DONE) {
+        printf("错误: 数据库备份失败: %d\n", rc);
+        sqlite3_backup_finish(backup);
+        goto cleanup;
+    }
+    
+    sqlite3_backup_finish(backup);
+    printf("数据库复制完成\n");
+    
+    // Close databases first to ensure all data is written
+    if (source) {
+        sqlite3_close(source);
+        source = NULL;
+    }
+    if (target) {
+        sqlite3_close(target);
+        target = NULL;
+    }
+    
+    // Update file header with correct statistics
+    printf("更新文件头统计信息...\n");
+    FILE *compressed_file = fopen(compressed_db, "r+b");
+    if (compressed_file) {
+        CCVFSFileHeader header;
+        
+        // Read current header
+        if (fread(&header, sizeof(CCVFSFileHeader), 1, compressed_file) == 1) {
+            // Update statistics
+            header.original_file_size = (uint64_t)source_size;
+            target_size = get_file_size(compressed_db);
+            header.compressed_file_size = (uint64_t)target_size;
+            
+            if (source_size > 0) {
+                header.compression_ratio = (uint32_t)((source_size - target_size) * 100 / source_size);
+            } else {
+                header.compression_ratio = 0;
+            }
+            
+            // Write updated header back
+            fseek(compressed_file, 0, SEEK_SET);
+            if (fwrite(&header, sizeof(CCVFSFileHeader), 1, compressed_file) == 1) {
+                printf("✓ 文件头统计信息更新成功\n");
+            } else {
+                printf("⚠ 警告: 无法更新文件头统计信息\n");
+            }
+        } else {
+            printf("⚠ 警告: 无法读取文件头\n");
+        }
+        
+        fclose(compressed_file);
+    } else {
+        printf("⚠ 警告: 无法打开压缩文件更新统计信息\n");
+    }
+    
+    // Get final compressed file size
+    target_size = get_file_size(compressed_db);
+    end_time = time(NULL);
+    
+    // Display compression results
+    if (target_size > 0) {
+        double compression_ratio = (double)(source_size - target_size) * 100.0 / source_size;
+        printf("\n压缩完成!\n");
+        printf("原始大小: %ld 字节\n", source_size);
+        printf("压缩后大小: %ld 字节\n", target_size);
+        printf("压缩比: %.2f%%\n", compression_ratio);
+        printf("节省空间: %ld 字节\n", source_size - target_size);
+        printf("块大小: %u KB\n", block_size / 1024);
+        printf("用时: %ld 秒\n", end_time - start_time);
+    } else {
+        printf("警告: 无法获取压缩文件大小\n");
+    }
+    
+    rc = SQLITE_OK;
+
+cleanup:
+    if (source) sqlite3_close(source);
+    if (target) sqlite3_close(target);
+    if (source_file) fclose(source_file);
+    if (target_file) fclose(target_file);
+    
+    sqlite3_ccvfs_destroy("compress_vfs_custom");
+    
+    return rc;
+}

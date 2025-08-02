@@ -242,7 +242,7 @@ int ccvfs_init_header(CCVFSFile *pFile, CCVFS *pVfs) {
     pFile->header.header_size = CCVFS_HEADER_SIZE;
     
     // SQLite compatibility (set page size to match block size for optimal performance)
-    pFile->header.original_page_size = CCVFS_DEFAULT_BLOCK_SIZE;  // 64KB pages = 64KB blocks
+    pFile->header.original_page_size = pVfs->block_size;  // Use VFS block size
     pFile->header.sqlite_version = sqlite3_libversion_number();
     pFile->header.database_size_pages = 0;
     
@@ -256,8 +256,8 @@ int ccvfs_init_header(CCVFSFile *pFile, CCVFS *pVfs) {
                 CCVFS_MAX_ALGORITHM_NAME - 1);
     }
     
-    // Block configuration
-    pFile->header.block_size = CCVFS_DEFAULT_BLOCK_SIZE;
+    // Block configuration - use VFS's configured block size
+    pFile->header.block_size = pVfs->block_size;
     pFile->header.total_blocks = 0;
     pFile->header.index_table_offset = CCVFS_INDEX_TABLE_OFFSET;  // Fixed position
     

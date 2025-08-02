@@ -86,6 +86,7 @@ int sqlite3_ccvfs_create(
     // Set CCVFS specific data
     pNew->pRootVfs = pRootVfs;
     pNew->creation_flags = flags;
+    pNew->block_size = CCVFS_DEFAULT_BLOCK_SIZE;  // Use default block size
     
     // Copy algorithm names
     char *pDest = (char*)&pNew[1] + nName;
@@ -187,6 +188,54 @@ int sqlite3_activate_ccvfs(const char *zCompressType, const char *zEncryptType) 
         return SQLITE_OK;
     } else {
         CCVFS_ERROR("Cannot find the newly created CCVFS");
+        return SQLITE_ERROR;
+    }
+}
+
+/*
+ * Create compression and encryption VFS with custom block size
+ */
+int sqlite3_ccvfs_create_with_block_size(
+    const char *zVfsName,
+    sqlite3_vfs *pRootVfs,
+    const char *zCompressType,
+    const char *zEncryptType,
+    uint32_t blockSize,
+    uint32_t flags
+) {
+    int rc;
+    
+    // Validate block size
+    if (blockSize < CCVFS_MIN_BLOCK_SIZE || blockSize > CCVFS_MAX_BLOCK_SIZE) {
+        CCVFS_ERROR("Invalid block size: %u (must be between %u and %u)", 
+                    blockSize, CCVFS_MIN_BLOCK_SIZE, CCVFS_MAX_BLOCK_SIZE);
+        return SQLITE_ERROR;
+    }
+    
+    // Check if block size is power of 2
+    if ((blockSize & (blockSize - 1)) != 0) {
+        CCVFS_ERROR("Block size must be a power of 2: %u", blockSize);
+        return SQLITE_ERROR;
+    }
+    
+    CCVFS_DEBUG("Creating CCVFS with block size: %u bytes (%u KB)", 
+                blockSize, blockSize / 1024);
+    
+    // Create CCVFS with default block size first
+    rc = sqlite3_ccvfs_create(zVfsName, pRootVfs, zCompressType, zEncryptType, flags);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+    
+    // Update block size in the created VFS
+    sqlite3_vfs *pVfs = sqlite3_vfs_find(zVfsName);
+    if (pVfs) {
+        CCVFS *pCcvfs = (CCVFS*)pVfs;
+        pCcvfs->block_size = blockSize;
+        CCVFS_INFO("Updated CCVFS block size to %u bytes", blockSize);
+        return SQLITE_OK;
+    } else {
+        CCVFS_ERROR("Cannot find created CCVFS: %s", zVfsName);
         return SQLITE_ERROR;
     }
 }

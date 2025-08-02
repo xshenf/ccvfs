@@ -5,11 +5,12 @@
 #include <getopt.h>
 
 // Function declarations from db_compress_tool.c
-extern int sqlite3_ccvfs_compress_database(
+extern int sqlite3_ccvfs_compress_database_with_block_size(
     const char *source_db,
     const char *compressed_db,
     const char *compress_algorithm,
     const char *encrypt_algorithm,
+    uint32_t block_size,
     int compression_level
 );
 
@@ -33,14 +34,62 @@ static void print_usage(const char *program_name) {
     printf("  -c, --compress-algo <算法>       压缩算法 (rle, lz4, zlib)\n");
     printf("  -e, --encrypt-algo <算法>        加密算法 (xor, aes128, aes256, chacha20)\n");
     printf("  -l, --level <等级>               压缩等级 (1-9, 默认: 6)\n");
+    printf("  -b, --block-size <大小>          块大小 (1K, 4K, 8K, 16K, 32K, 64K, 128K, 256K, 512K, 1M, 默认: 64K)\n");
     printf("  -h, --help                       显示帮助信息\n");
     printf("  -v, --verbose                    详细输出\n\n");
+    
+    printf("块大小选项:\n");
+    printf("  1K, 1024         1KB 块 (适合极小文件)\n");
+    printf("  4K, 4096         4KB 块 (适合小文件)\n");
+    printf("  8K, 8192         8KB 块 (适合小到中等文件)\n");
+    printf("  16K, 16384       16KB 块 (平衡点)\n");
+    printf("  32K, 32768       32KB 块 (适合中等文件)\n");
+    printf("  64K, 65536       64KB 块 (默认, 适合大文件)\n");
+    printf("  128K, 131072     128KB 块 (适合很大文件)\n");
+    printf("  256K, 262144     256KB 块 (适合巨大文件)\n");
+    printf("  512K, 524288     512KB 块 (适合超大文件)\n");
+    printf("  1M, 1048576      1MB 块 (最大块大小)\n\n");
     
     printf("示例:\n");
     printf("  %s compress test.db test.ccvfs\n", program_name);
     printf("  %s compress -c zlib -e aes128 -l 9 test.db test.ccvfs\n", program_name);
+    printf("  %s compress -b 4K test.db test.ccvfs          # 使用4KB块大小\n", program_name);
+    printf("  %s compress -b 1M -c zlib test.db test.ccvfs  # 使用1MB块大小\n", program_name);
     printf("  %s decompress test.ccvfs restored.db\n", program_name);
     printf("  %s info test.ccvfs\n", program_name);
+}
+
+// Parse block size string to bytes
+static uint32_t parse_block_size(const char *size_str) {
+    if (!size_str) return CCVFS_DEFAULT_BLOCK_SIZE;
+    
+    char *endptr;
+    long value = strtol(size_str, &endptr, 10);
+    
+    if (value <= 0) return 0;
+    
+    // Handle size suffixes
+    if (*endptr) {
+        if (strcmp(endptr, "K") == 0 || strcmp(endptr, "k") == 0) {
+            value *= 1024;
+        } else if (strcmp(endptr, "M") == 0 || strcmp(endptr, "m") == 0) {
+            value *= 1024 * 1024;
+        } else {
+            return 0;  // Invalid suffix
+        }
+    }
+    
+    // Validate range
+    if (value < CCVFS_MIN_BLOCK_SIZE || value > CCVFS_MAX_BLOCK_SIZE) {
+        return 0;
+    }
+    
+    // Check if power of 2
+    if ((value & (value - 1)) != 0) {
+        return 0;
+    }
+    
+    return (uint32_t)value;
 }
 
 static void print_stats(const CCVFSStats *stats) {
@@ -64,6 +113,7 @@ int main(int argc, char *argv[]) {
     const char *compress_algo = "zlib";
     const char *encrypt_algo = NULL;  // Default to no encryption
     int compression_level = 6;
+    uint32_t block_size = CCVFS_DEFAULT_BLOCK_SIZE;  // Default to 64KB
     int verbose = 0;
     int rc;
     
@@ -71,13 +121,14 @@ int main(int argc, char *argv[]) {
         {"compress-algo", required_argument, 0, 'c'},
         {"encrypt-algo",  required_argument, 0, 'e'},
         {"level",         required_argument, 0, 'l'},
+        {"block-size",    required_argument, 0, 'b'},
         {"verbose",       no_argument,       0, 'v'},
         {"help",          no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
     
     int c;
-    while ((c = getopt_long(argc, argv, "c:e:l:vh", long_options, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "c:e:l:b:vh", long_options, NULL)) != -1) {
         switch (c) {
             case 'c':
                 compress_algo = optarg;
@@ -92,6 +143,15 @@ int main(int argc, char *argv[]) {
                 compression_level = atoi(optarg);
                 if (compression_level < 1 || compression_level > 9) {
                     fprintf(stderr, "错误: 压缩等级必须在1-9之间\n");
+                    return 1;
+                }
+                break;
+            case 'b':
+                block_size = parse_block_size(optarg);
+                if (block_size == 0) {
+                    fprintf(stderr, "错误: 无效的块大小 '%s'\n", optarg);
+                    fprintf(stderr, "支持的格式: 1K, 4K, 8K, 16K, 32K, 64K, 128K, 256K, 512K, 1M\n");
+                    fprintf(stderr, "或直接使用字节数: 1024, 4096, 8192, 16384, 32768, 65536, ...\n");
                     return 1;
                 }
                 break;
@@ -133,13 +193,14 @@ int main(int argc, char *argv[]) {
             printf("  目标文件: %s\n", target_db);
             printf("  压缩算法: %s\n", compress_algo);
             printf("  加密算法: %s\n", encrypt_algo ? encrypt_algo : "无");
+            printf("  块大小: %u 字节 (%u KB)\n", block_size, block_size / 1024);
             printf("  压缩等级: %d\n", compression_level);
             printf("\n");
         }
         
-        rc = sqlite3_ccvfs_compress_database(source_db, target_db, 
-                                             compress_algo, encrypt_algo, 
-                                             compression_level);
+        rc = sqlite3_ccvfs_compress_database_with_block_size(source_db, target_db, 
+                                                             compress_algo, encrypt_algo, 
+                                                             block_size, compression_level);
         
         if (rc == SQLITE_OK) {
             printf("\n数据库压缩成功!\n");

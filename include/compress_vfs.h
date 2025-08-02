@@ -16,7 +16,21 @@ extern "C" {
 #define CCVFS_VERSION_MINOR 0
 #define CCVFS_HEADER_SIZE 128
 #define CCVFS_DEFAULT_BLOCK_SIZE (64 * 1024)  // 64KB blocks
+#define CCVFS_MIN_BLOCK_SIZE (1 * 1024)       // 1KB minimum
+#define CCVFS_MAX_BLOCK_SIZE (1 * 1024 * 1024) // 1MB maximum
 #define CCVFS_MAX_ALGORITHM_NAME 12
+
+// Common block sizes
+#define CCVFS_BLOCK_SIZE_1KB   (1 * 1024)
+#define CCVFS_BLOCK_SIZE_4KB   (4 * 1024)
+#define CCVFS_BLOCK_SIZE_8KB   (8 * 1024)
+#define CCVFS_BLOCK_SIZE_16KB  (16 * 1024)
+#define CCVFS_BLOCK_SIZE_32KB  (32 * 1024)
+#define CCVFS_BLOCK_SIZE_64KB  (64 * 1024)
+#define CCVFS_BLOCK_SIZE_128KB (128 * 1024)
+#define CCVFS_BLOCK_SIZE_256KB (256 * 1024)
+#define CCVFS_BLOCK_SIZE_512KB (512 * 1024)
+#define CCVFS_BLOCK_SIZE_1MB   (1 * 1024 * 1024)
 
 // File layout constants
 #define CCVFS_MAX_BLOCKS 65536  // Maximum blocks supported (2^16)
@@ -152,6 +166,28 @@ int sqlite3_ccvfs_create(
 );
 
 /*
+ * Register compression and encryption VFS module with custom block size
+ * Parameters:
+ *   zVfsName - Name of the new VFS
+ *   pRootVfs - Underlying VFS (usually the default VFS)
+ *   zCompressType - Compression algorithm type
+ *   zEncryptType - Encryption algorithm type
+ *   blockSize - Block size in bytes (1KB - 1MB)
+ *   flags - Creation flags (CCVFS_CREATE_*)
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_create_with_block_size(
+    const char *zVfsName,
+    sqlite3_vfs *pRootVfs,
+    const char *zCompressType,
+    const char *zEncryptType,
+    uint32_t blockSize,
+    uint32_t flags
+);
+
+/*
  * Destroy compression and encryption VFS module
  */
 int sqlite3_ccvfs_destroy(const char *zVfsName);
@@ -179,6 +215,18 @@ int sqlite3_ccvfs_compress_database(
     const char *compressed_db,
     const char *compress_algorithm,
     const char *encrypt_algorithm,
+    int compression_level
+);
+
+/*
+ * Compress an existing SQLite database with custom block size
+ */
+int sqlite3_ccvfs_compress_database_with_block_size(
+    const char *source_db,
+    const char *compressed_db,
+    const char *compress_algorithm,
+    const char *encrypt_algorithm,
+    uint32_t block_size,
     int compression_level
 );
 

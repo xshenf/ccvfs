@@ -43,6 +43,7 @@ typedef struct CCVFS {
     CompressAlgorithm *pCompressAlg; /* Compression algorithm implementation */
     EncryptAlgorithm *pEncryptAlg;   /* Encryption algorithm implementation */
     uint32_t creation_flags;    /* Creation flags */
+    uint32_t block_size;        /* Block size in bytes */
 } CCVFS;
 
 /*
