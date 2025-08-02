@@ -280,8 +280,12 @@ int ccvfs_init_header(CCVFSFile *pFile, CCVFS *pVfs) {
     pFile->space_reuse_count = 0;
     pFile->space_expansion_count = 0;
     pFile->new_allocation_count = 0;
+    pFile->hole_reclaim_count = 0;
+    pFile->best_fit_count = 0;
+    pFile->sequential_write_count = 0;
+    pFile->last_written_block = UINT32_MAX;
     
-    CCVFS_DEBUG("Initialized new CCVFS header with space tracking");
+    CCVFS_DEBUG("Initialized new CCVFS header with advanced space tracking");
     return SQLITE_OK;
 }
 

@@ -69,6 +69,12 @@ typedef struct CCVFSFile {
     uint32_t space_reuse_count;       /* Number of successful space reuses */
     uint32_t space_expansion_count;   /* Number of space expansions */
     uint32_t new_allocation_count;    /* Number of new space allocations */
+    
+    // Advanced space management
+    uint32_t hole_reclaim_count;      /* Number of space holes reclaimed */
+    uint32_t best_fit_count;          /* Number of best-fit allocations */
+    uint32_t sequential_write_count;  /* Number of sequential writes detected */
+    uint32_t last_written_block;      /* Last block number written (for sequential detection) */
 } CCVFSFile;
 
 #ifdef __cplusplus

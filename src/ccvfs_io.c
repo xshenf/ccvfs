@@ -4,8 +4,19 @@
 #include "ccvfs_utils.h"
 #include <string.h>
 
-// Forward declaration
+// Forward declarations
 static void ccvfs_update_space_tracking(CCVFSFile *pFile);
+static sqlite3_int64 ccvfs_find_best_fit_space(CCVFSFile *pFile, uint32_t requiredSize, uint32_t *pWastedSpace);
+
+/*
+ * Find the best fitting available space hole or gap for the required size
+ * DISABLED: Always return 0 to use end-of-file allocation for stability
+ */
+static sqlite3_int64 ccvfs_find_best_fit_space(CCVFSFile *pFile, uint32_t requiredSize, uint32_t *pWastedSpace) {
+    // Disable hole detection completely for now
+    *pWastedSpace = 0;
+    return 0;
+}
 
 /*
  * IO Methods table
@@ -538,26 +549,47 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
         }
     } else {
         allocate_new_space:
-        // Need new space - append to end of file
+        // Smart space allocation: try best-fit first, then append to end
         pFile->new_allocation_count++;
-        sqlite3_int64 fileSize;
-        int sizeRc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
-        if (sizeRc != SQLITE_OK) {
-            CCVFS_ERROR("Failed to get file size: %d", sizeRc);
-            if (encryptedData) sqlite3_free(encryptedData);
-            if (compressedData) sqlite3_free(compressedData);
-            return sizeRc;
-        }
         
-        // Ensure we write data blocks after the reserved index table space
-        writeOffset = fileSize;
-        if (writeOffset < CCVFS_DATA_BLOCKS_OFFSET) {
-            writeOffset = CCVFS_DATA_BLOCKS_OFFSET;
-            CCVFS_DEBUG("Adjusting write offset to %llu (after reserved index space)", 
-                       (unsigned long long)writeOffset);
+        // Try to find a suitable hole using best-fit algorithm
+        uint32_t wastedSpace = 0;
+        writeOffset = ccvfs_find_best_fit_space(pFile, compressedSize, &wastedSpace);
+        
+        if (writeOffset > 0) {
+            // Found a suitable hole - use it
+            pFile->hole_reclaim_count++;
+            pFile->best_fit_count++;
+            CCVFS_DEBUG("Using best-fit hole at offset %llu for %u bytes (waste: %u)", 
+                       (unsigned long long)writeOffset, compressedSize, wastedSpace);
         } else {
-            CCVFS_DEBUG("Allocating new block at end of file: offset %llu", 
-                       (unsigned long long)writeOffset);
+            // No suitable hole found - append to end of file
+            sqlite3_int64 fileSize;
+            int sizeRc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
+            if (sizeRc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to get file size: %d", sizeRc);
+                if (encryptedData) sqlite3_free(encryptedData);
+                if (compressedData) sqlite3_free(compressedData);
+                return sizeRc;
+            }
+            
+            // Check for sequential write pattern (multiple consecutive block allocations)
+            if (pFile->last_written_block != UINT32_MAX && blockNum == pFile->last_written_block + 1) {
+                pFile->sequential_write_count++;
+                CCVFS_DEBUG("Sequential write detected: blocks %u->%u", pFile->last_written_block, blockNum);
+            }
+            pFile->last_written_block = blockNum;
+            
+            // Ensure we write data blocks after the reserved index table space
+            writeOffset = fileSize;
+            if (writeOffset < CCVFS_DATA_BLOCKS_OFFSET) {
+                writeOffset = CCVFS_DATA_BLOCKS_OFFSET;
+                CCVFS_DEBUG("Adjusting write offset to %llu (after reserved index space)", 
+                           (unsigned long long)writeOffset);
+            } else {
+                CCVFS_DEBUG("Allocating new block at end of file: offset %llu (sequential: %u)", 
+                           (unsigned long long)writeOffset, pFile->sequential_write_count);
+            }
         }
     }
     
@@ -640,29 +672,44 @@ static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
     pFile->total_allocated_space = totalAllocated;
     pFile->total_used_space = totalUsed;
     
-    // Calculate fragmentation score (0-100)
-    // Factors: wasted space ratio, block reuse efficiency, allocation pattern
+    // Calculate advanced fragmentation score (0-100)
+    // Factors: wasted space ratio, reuse efficiency, hole reclaim efficiency, sequential write efficiency
     if (totalAllocated > 0) {
-        uint32_t wastedSpaceScore = (uint32_t)((totalWastedSpace * 50) / totalAllocated); // 0-50 points
+        uint32_t wastedSpaceScore = (uint32_t)((totalWastedSpace * 30) / totalAllocated); // 0-30 points
         
         uint32_t reuseEfficiencyScore = 0;
+        uint32_t holeReclaimScore = 0;
+        uint32_t sequentialWriteScore = 0;
+        
         uint32_t totalOperations = pFile->space_reuse_count + pFile->space_expansion_count + pFile->new_allocation_count;
         if (totalOperations > 0) {
+            // Reuse efficiency (0-30 points)
             uint32_t reuseRatio = (pFile->space_reuse_count * 100) / totalOperations;
-            reuseEfficiencyScore = (100 - reuseRatio) / 2; // 0-50 points (lower reuse = higher fragmentation)
+            reuseEfficiencyScore = (100 - reuseRatio) * 30 / 100;
+            
+            // Hole reclaim efficiency (0-25 points) - good hole reclaiming reduces fragmentation
+            uint32_t holeReclaimRatio = (pFile->hole_reclaim_count * 100) / totalOperations;
+            holeReclaimScore = (100 - holeReclaimRatio) * 25 / 100;
+            
+            // Sequential write efficiency (0-15 points) - sequential writes reduce fragmentation
+            if (blockCount > 1) {
+                uint32_t sequentialRatio = (pFile->sequential_write_count * 100) / (blockCount - 1);
+                sequentialWriteScore = (100 - sequentialRatio) * 15 / 100;
+            }
         }
         
-        pFile->fragmentation_score = wastedSpaceScore + reuseEfficiencyScore;
+        pFile->fragmentation_score = wastedSpaceScore + reuseEfficiencyScore + holeReclaimScore + sequentialWriteScore;
         if (pFile->fragmentation_score > 100) pFile->fragmentation_score = 100;
     } else {
         pFile->fragmentation_score = 0;
     }
     
-    CCVFS_DEBUG("Space tracking updated: allocated=%llu, used=%llu, fragmentation=%u%%, "
-               "reuse=%u, expansion=%u, new=%u", 
+    CCVFS_DEBUG("Advanced space tracking: allocated=%llu, used=%llu, fragmentation=%u%%, "
+               "reuse=%u, expansion=%u, new=%u, holes=%u, bestfit=%u, sequential=%u", 
                (unsigned long long)totalAllocated, (unsigned long long)totalUsed, 
                pFile->fragmentation_score, pFile->space_reuse_count, 
-               pFile->space_expansion_count, pFile->new_allocation_count);
+               pFile->space_expansion_count, pFile->new_allocation_count,
+               pFile->hole_reclaim_count, pFile->best_fit_count, pFile->sequential_write_count);
 }
 
 int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst) {

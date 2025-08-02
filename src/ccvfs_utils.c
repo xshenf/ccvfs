@@ -42,6 +42,9 @@ int ccvfs_get_space_stats(sqlite3_file *pFile, CCVFSSpaceStats *pStats) {
     pStats->space_reuse_count = p->space_reuse_count;
     pStats->space_expansion_count = p->space_expansion_count;
     pStats->new_allocation_count = p->new_allocation_count;
+    pStats->hole_reclaim_count = p->hole_reclaim_count;
+    pStats->best_fit_count = p->best_fit_count;
+    pStats->sequential_write_count = p->sequential_write_count;
     
     // Calculate derived metrics
     if (p->total_allocated_space > 0) {
@@ -53,8 +56,10 @@ int ccvfs_get_space_stats(sqlite3_file *pFile, CCVFSSpaceStats *pStats) {
     uint32_t totalOperations = p->space_reuse_count + p->space_expansion_count + p->new_allocation_count;
     if (totalOperations > 0) {
         pStats->reuse_efficiency_ratio = (double)p->space_reuse_count / (double)totalOperations;
+        pStats->hole_reclaim_ratio = (double)p->hole_reclaim_count / (double)totalOperations;
     } else {
         pStats->reuse_efficiency_ratio = 0.0;
+        pStats->hole_reclaim_ratio = 0.0;
     }
     
     return SQLITE_OK;

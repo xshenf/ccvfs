@@ -22,8 +22,12 @@ typedef struct {
     uint32_t space_reuse_count;
     uint32_t space_expansion_count;
     uint32_t new_allocation_count;
+    uint32_t hole_reclaim_count;
+    uint32_t best_fit_count;
+    uint32_t sequential_write_count;
     double space_efficiency_ratio;
     double reuse_efficiency_ratio;
+    double hole_reclaim_ratio;
 } CCVFSSpaceStats;
 
 int ccvfs_get_space_stats(sqlite3_file *pFile, CCVFSSpaceStats *pStats);
