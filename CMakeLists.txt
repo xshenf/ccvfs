@@ -109,6 +109,10 @@ target_compile_definitions(shell PRIVATE SQLITE_ENABLE_CEROD=1)
 add_executable(db_tool src/db_tool.c)
 target_link_libraries(db_tool sqlitecc)
 
+# 数据库生成工具
+add_executable(db_generator src/db_generator.c)
+target_link_libraries(db_generator sqlitecc)
+
 # 数据库压缩解压测试程序
 add_executable(db_compress_test test/db_compress_test.c)
 target_link_libraries(db_compress_test sqlitecc)
@@ -125,6 +129,7 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(large_db_zlib_test m)
     target_link_libraries(shell m)
     target_link_libraries(db_tool m)
+    target_link_libraries(db_generator m)
     target_link_libraries(db_compress_test m)
     target_link_libraries(simple_db_test m)
 endif()
