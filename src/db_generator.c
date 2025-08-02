@@ -36,6 +36,7 @@ typedef struct {
     int table_count;            // Number of tables to create
     int verbose;                // Verbose output
     int batch_size;             // Records per transaction
+    int use_wal_mode;           // Use WAL journal mode (default: true)
 } GeneratorConfig;
 
 // Get file size
@@ -818,6 +819,7 @@ static void print_usage(const char *program_name) {
     printf("  -r, --record-size <大小>    平均记录大小 (字节, 默认: 1024)\n");
     printf("  -t, --tables <数量>         创建表的数量 (默认: 1)\n");
     printf("  -batch, --batch-size <大小> 每个事务的记录数 (默认: 1000)\n");
+    printf("  --no-wal                    禁用WAL模式，使用DELETE journal模式\n");
     printf("  -v, --verbose               详细输出\n");
     printf("  -h, --help                  显示帮助信息\n\n");
     
@@ -842,7 +844,8 @@ int main(int argc, char *argv[]) {
         .record_size = 1024,
         .table_count = 1,
         .verbose = 0,
-        .batch_size = 1000
+        .batch_size = 1000,
+        .use_wal_mode = 1  // Default to WAL mode
     };
     
     static struct option long_options[] = {
@@ -855,6 +858,7 @@ int main(int argc, char *argv[]) {
         {"record-size",     required_argument, 0, 'r'},
         {"tables",          required_argument, 0, 't'},
         {"batch-size",      required_argument, 0, 1000},
+        {"no-wal",          no_argument,       0, 1001},
         {"verbose",         no_argument,       0, 'v'},
         {"help",            no_argument,       0, 'h'},
         {0, 0, 0, 0}
@@ -926,6 +930,9 @@ int main(int argc, char *argv[]) {
                     return 1;
                 }
                 break;
+            case 1001:  // --no-wal
+                config.use_wal_mode = 0;
+                break;
             case 'v':
                 config.verbose = 1;
                 break;
@@ -962,6 +969,7 @@ int main(int argc, char *argv[]) {
     printf("输出文件: %s\n", config.output_file);
     printf("目标大小: %ld 字节 (%.2f MB)\n", config.target_size, config.target_size / (1024.0 * 1024.0));
     printf("压缩: %s\n", config.use_compression ? "是" : "否");
+    printf("Journal模式: %s\n", config.use_wal_mode ? "WAL" : "DELETE");
     if (config.use_compression) {
         printf("压缩算法: %s\n", config.compress_algorithm);
         printf("加密算法: %s\n", config.encrypt_algorithm ? config.encrypt_algorithm : "无");
@@ -1009,7 +1017,11 @@ int main(int argc, char *argv[]) {
     }
     
     // Configure database
-    sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+    if (config.use_wal_mode) {
+        sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+    } else {
+        sqlite3_exec(db, "PRAGMA journal_mode=DELETE", NULL, NULL, NULL);
+    }
     sqlite3_exec(db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA cache_size=-2000", NULL, NULL, NULL);  // 2MB cache
     

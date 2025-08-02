@@ -432,12 +432,25 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
     sqlite3_int64 writeOffset;
     
     // Check if block already exists and can be reused
-    if (pIndex->physical_offset != 0 && pIndex->compressed_size >= compressedSize) {
-        // Reuse existing block location if the new data fits
-        writeOffset = pIndex->physical_offset;
-        CCVFS_DEBUG("Reusing existing block location at offset %llu (size %u >= %u)", 
-                   (unsigned long long)writeOffset, pIndex->compressed_size, compressedSize);
+    if (pIndex->physical_offset != 0) {
+        uint32_t existingSpace = pIndex->compressed_size;
+        // Use a threshold to decide reuse vs new allocation
+        // Reuse if new size is within 25% larger than existing space, or if existing space is much larger
+        if (compressedSize <= existingSpace || 
+            (compressedSize <= existingSpace * 1.25) ||
+            (existingSpace >= compressedSize * 2)) {
+            // Reuse existing block location
+            writeOffset = pIndex->physical_offset;
+            CCVFS_DEBUG("Reusing existing block location at offset %llu (new=%u, existing=%u)", 
+                       (unsigned long long)writeOffset, compressedSize, existingSpace);
+        } else {
+            // Size difference too large, allocate new space
+            CCVFS_DEBUG("Size increase too large (new=%u vs existing=%u), allocating new space", 
+                       compressedSize, existingSpace);
+            goto allocate_new_space;
+        }
     } else {
+        allocate_new_space:
         // Need new space - append to end of file
         sqlite3_int64 fileSize;
         int sizeRc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
