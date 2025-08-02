@@ -38,7 +38,8 @@
       "Bash(./db_compress_test.exe)",
       "Bash(sqlite3:*)",
       "Bash(./simple_db_test.exe)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(python3:*)"
     ],
     "deny": []
   }
