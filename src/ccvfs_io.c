@@ -488,14 +488,22 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
             CCVFS_DEBUG("Reusing existing space at offset %llu: new=%u, existing=%u, wasted=%u (%.1f%% efficiency)", 
                        (unsigned long long)writeOffset, compressedSize, existingSpace, 
                        wastedSpace, spaceEfficiency * 100.0);
-        } else if (compressedSize <= existingSpace * 1.25) {
-            // SCENARIO 2: Moderate growth (up to 25% larger) - check if safe expansion is possible
-            // This allows for minor size increases without always allocating new space
+        } else {
+            // SCENARIO 2: Any size growth - check if safe expansion is possible
+            // Allow unlimited expansion if space is available behind the block
             sqlite3_int64 fileSize;
             int sizeRc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
             if (sizeRc == SQLITE_OK) {
                 uint64_t blockEndOffset = pIndex->physical_offset + existingSpace;
                 uint32_t expansionNeeded = compressedSize - existingSpace;
+                
+                // Limit extreme expansions to prevent pathological behavior
+                double growthRatio = (double)compressedSize / (double)existingSpace;
+                if (growthRatio > 10.0) {
+                    CCVFS_DEBUG("Extreme growth (%.1fx) detected, allocating new space for stability", growthRatio);
+                    pFile->new_allocation_count++;
+                    goto allocate_new_space;
+                }
                 
                 // Check if we can safely expand (no data immediately follows this block)
                 int canExpand = 1;
@@ -514,8 +522,8 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
                     // Safe to expand existing space
                     writeOffset = pIndex->physical_offset;
                     pFile->space_expansion_count++;
-                    CCVFS_DEBUG("Expanding existing block at offset %llu: %u->%u bytes (+%u expansion)", 
-                               (unsigned long long)writeOffset, existingSpace, compressedSize, expansionNeeded);
+                    CCVFS_DEBUG("Expanding existing block at offset %llu: %u->%u bytes (+%u expansion, %.1fx growth)", 
+                               (unsigned long long)writeOffset, existingSpace, compressedSize, expansionNeeded, growthRatio);
                 } else {
                     // Cannot expand safely - allocate new space
                     CCVFS_DEBUG("Cannot expand safely (adjacent blocks or EOF), allocating new space");
@@ -527,14 +535,6 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
                 pFile->new_allocation_count++;
                 goto allocate_new_space;
             }
-        } else {
-            // SCENARIO 3: Significant growth (>25%) - allocate new space
-            // This prevents excessive fragmentation from large size increases
-            double growthRatio = (double)compressedSize / (double)existingSpace;
-            CCVFS_DEBUG("Significant size increase (%.1fx growth), allocating new space (new=%u vs existing=%u)", 
-                       growthRatio, compressedSize, existingSpace);
-            pFile->new_allocation_count++;
-            goto allocate_new_space;
         }
     } else {
         allocate_new_space:
