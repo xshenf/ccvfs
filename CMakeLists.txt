@@ -92,6 +92,12 @@ target_link_libraries(vfs_connection_test sqlitecc)
 add_executable(compression_ratio_test test/compression_ratio_test.c)
 target_link_libraries(compression_ratio_test sqlitecc)
 
+add_executable(large_db_stress_test test/large_db_stress_test.c)
+target_link_libraries(large_db_stress_test sqlitecc)
+
+add_executable(simple_large_test test/simple_large_test.c)
+target_link_libraries(simple_large_test sqlitecc)
+
 # Shell程序
 add_executable(shell src/shell.c)
 target_link_libraries(shell sqlitecc)

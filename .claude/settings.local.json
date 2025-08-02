@@ -29,7 +29,11 @@
       "Bash(./basic_test.exe)",
       "Bash(./simple_test.exe)",
       "Bash(./core_algorithm_test.exe)",
-      "Bash(./vfs_connection_test.exe)"
+      "Bash(./vfs_connection_test.exe)",
+      "Bash(./large_db_stress_test.exe)",
+      "Bash(timeout 60 ./large_db_stress_test.exe)",
+      "Bash(./simple_large_test.exe)",
+      "Bash(timeout 120 ./simple_large_test.exe)"
     ],
     "deny": []
   }
