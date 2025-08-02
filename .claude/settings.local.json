@@ -46,7 +46,8 @@
       "Bash(./db_generator.exe:*)",
       "Bash(mkdir:*)",
       "Bash(CCVFS_DEBUG=1 ./db_tool.exe compress -b 4K debug_test.db debug_test_compressed.ccvfs)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(CCVFS_DEBUG=1 ./simple_db_test.exe)"
     ],
     "deny": []
   }

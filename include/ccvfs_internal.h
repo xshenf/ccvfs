@@ -60,6 +60,7 @@ typedef struct CCVFSFile {
     int header_loaded;          /* Header loaded flag */
     int open_flags;             /* File open flags */
     int is_ccvfs_file;          /* Is this a CCVFS format file */
+    char *filename;             /* File path for debugging */
 } CCVFSFile;
 
 #ifdef __cplusplus

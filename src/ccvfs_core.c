@@ -40,12 +40,23 @@ int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile,
     
     // Determine file type at open time
     if (flags & SQLITE_OPEN_CREATE) {
+        // Check if this is a SQLite auxiliary file (should not be compressed)
+        const char *filename = zName ? zName : "";
+        int isAuxFile = (strstr(filename, "-journal") != NULL ||
+                        strstr(filename, "-wal") != NULL ||
+                        strstr(filename, "-shm") != NULL);
+        
         // Creating new file - it will be CCVFS format if we have compression/encryption
-        if (pCcvfs->pCompressAlg || pCcvfs->pEncryptAlg) {
+        // but exclude SQLite auxiliary files
+        if (!isAuxFile && (pCcvfs->pCompressAlg || pCcvfs->pEncryptAlg)) {
             pCcvfsFile->is_ccvfs_file = 1;
             CCVFS_DEBUG("Creating new CCVFS file");
         } else {
-            CCVFS_DEBUG("Creating new regular file (no compression/encryption)");
+            if (isAuxFile) {
+                CCVFS_DEBUG("Creating SQLite auxiliary file (regular format): %s", filename);
+            } else {
+                CCVFS_DEBUG("Creating new regular file (no compression/encryption)");
+            }
         }
     } else {
         // Opening existing file - check if it's CCVFS format
