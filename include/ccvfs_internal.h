@@ -61,6 +61,14 @@ typedef struct CCVFSFile {
     int open_flags;             /* File open flags */
     int is_ccvfs_file;          /* Is this a CCVFS format file */
     char *filename;             /* File path for debugging */
+    
+    // Space utilization tracking
+    uint64_t total_allocated_space;   /* Total space allocated for data blocks */
+    uint64_t total_used_space;        /* Total space actually used by compressed data */
+    uint32_t fragmentation_score;     /* Fragmentation score (0-100, higher = more fragmented) */
+    uint32_t space_reuse_count;       /* Number of successful space reuses */
+    uint32_t space_expansion_count;   /* Number of space expansions */
+    uint32_t new_allocation_count;    /* Number of new space allocations */
 } CCVFSFile;
 
 #ifdef __cplusplus

@@ -4,6 +4,9 @@
 #include "ccvfs_utils.h"
 #include <string.h>
 
+// Forward declaration
+static void ccvfs_update_space_tracking(CCVFSFile *pFile);
+
 /*
  * IO Methods table
  */
@@ -470,22 +473,73 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
     if (pIndex->physical_offset != 0) {
         uint32_t existingSpace = pIndex->compressed_size;
         
-        // SAFE REUSE: Only reuse if new data fits exactly within existing space
-        // This prevents overwriting adjacent blocks
+        // ENHANCED SPACE REUSE STRATEGY: Multiple reuse scenarios
         if (compressedSize <= existingSpace) {
-            // Safe to reuse - new data fits within existing boundaries
+            // SCENARIO 1: Perfect fit or smaller - direct reuse
             writeOffset = pIndex->physical_offset;
-            CCVFS_DEBUG("Safely reusing existing block location at offset %llu (new=%u, existing=%u)", 
-                       (unsigned long long)writeOffset, compressedSize, existingSpace);
+            
+            // Calculate space efficiency
+            uint32_t wastedSpace = existingSpace - compressedSize;
+            double spaceEfficiency = (double)compressedSize / (double)existingSpace;
+            
+            // Update space tracking counters
+            pFile->space_reuse_count++;
+            
+            CCVFS_DEBUG("Reusing existing space at offset %llu: new=%u, existing=%u, wasted=%u (%.1f%% efficiency)", 
+                       (unsigned long long)writeOffset, compressedSize, existingSpace, 
+                       wastedSpace, spaceEfficiency * 100.0);
+        } else if (compressedSize <= existingSpace * 1.25) {
+            // SCENARIO 2: Moderate growth (up to 25% larger) - check if safe expansion is possible
+            // This allows for minor size increases without always allocating new space
+            sqlite3_int64 fileSize;
+            int sizeRc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
+            if (sizeRc == SQLITE_OK) {
+                uint64_t blockEndOffset = pIndex->physical_offset + existingSpace;
+                uint32_t expansionNeeded = compressedSize - existingSpace;
+                
+                // Check if we can safely expand (no data immediately follows this block)
+                int canExpand = 1;
+                for (uint32_t i = 0; i < pFile->header.total_blocks; i++) {
+                    if (i != blockNum && pFile->pBlockIndex[i].physical_offset != 0) {
+                        uint64_t otherBlockStart = pFile->pBlockIndex[i].physical_offset;
+                        if (otherBlockStart >= blockEndOffset && 
+                            otherBlockStart < blockEndOffset + expansionNeeded + 32) { // 32 byte safety margin
+                            canExpand = 0;
+                            break;
+                        }
+                    }
+                }
+                
+                if (canExpand && blockEndOffset + expansionNeeded <= fileSize) {
+                    // Safe to expand existing space
+                    writeOffset = pIndex->physical_offset;
+                    pFile->space_expansion_count++;
+                    CCVFS_DEBUG("Expanding existing block at offset %llu: %u->%u bytes (+%u expansion)", 
+                               (unsigned long long)writeOffset, existingSpace, compressedSize, expansionNeeded);
+                } else {
+                    // Cannot expand safely - allocate new space
+                    CCVFS_DEBUG("Cannot expand safely (adjacent blocks or EOF), allocating new space");
+                    pFile->new_allocation_count++;
+                    goto allocate_new_space;
+                }
+            } else {
+                CCVFS_DEBUG("Failed to get file size for expansion check, allocating new space");
+                pFile->new_allocation_count++;
+                goto allocate_new_space;
+            }
         } else {
-            // New data is larger - must allocate new space to prevent corruption
-            CCVFS_DEBUG("New data too large for existing space (new=%u vs existing=%u), allocating new space", 
-                       compressedSize, existingSpace);
+            // SCENARIO 3: Significant growth (>25%) - allocate new space
+            // This prevents excessive fragmentation from large size increases
+            double growthRatio = (double)compressedSize / (double)existingSpace;
+            CCVFS_DEBUG("Significant size increase (%.1fx growth), allocating new space (new=%u vs existing=%u)", 
+                       growthRatio, compressedSize, existingSpace);
+            pFile->new_allocation_count++;
             goto allocate_new_space;
         }
     } else {
         allocate_new_space:
         // Need new space - append to end of file
+        pFile->new_allocation_count++;
         sqlite3_int64 fileSize;
         int sizeRc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
         if (sizeRc != SQLITE_OK) {
@@ -522,6 +576,9 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
     pIndex->checksum = checksum;
     pIndex->flags = flags;
     
+    // Update space utilization tracking
+    ccvfs_update_space_tracking(pFile);
+    
     // Mark index as dirty (will be saved on sync/close)
     pFile->index_dirty = 1;
     
@@ -550,8 +607,64 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
 }
 
 /*
- * Write to file
+ * Update space utilization tracking metrics
  */
+static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
+    uint64_t totalAllocated = 0;
+    uint64_t totalUsed = 0;
+    uint32_t blockCount = 0;
+    uint32_t wastedSpaceBlocks = 0;
+    uint64_t totalWastedSpace = 0;
+    
+    // Calculate space utilization from all blocks
+    for (uint32_t i = 0; i < pFile->header.total_blocks; i++) {
+        CCVFSBlockIndex *pIndex = &pFile->pBlockIndex[i];
+        if (pIndex->physical_offset != 0) { // Non-sparse block
+            blockCount++;
+            totalAllocated += pIndex->compressed_size;
+            totalUsed += pIndex->compressed_size; // All allocated space is currently used
+            
+            // Check for significant wasted space (>10% waste)
+            if (pIndex->original_size > 0) {
+                uint32_t wastedSpace = (pIndex->compressed_size > pIndex->original_size) ? 
+                                     0 : (pIndex->original_size - pIndex->compressed_size);
+                if (wastedSpace > pIndex->compressed_size * 0.1) {
+                    wastedSpaceBlocks++;
+                    totalWastedSpace += wastedSpace;
+                }
+            }
+        }
+    }
+    
+    // Update tracking fields
+    pFile->total_allocated_space = totalAllocated;
+    pFile->total_used_space = totalUsed;
+    
+    // Calculate fragmentation score (0-100)
+    // Factors: wasted space ratio, block reuse efficiency, allocation pattern
+    if (totalAllocated > 0) {
+        uint32_t wastedSpaceScore = (uint32_t)((totalWastedSpace * 50) / totalAllocated); // 0-50 points
+        
+        uint32_t reuseEfficiencyScore = 0;
+        uint32_t totalOperations = pFile->space_reuse_count + pFile->space_expansion_count + pFile->new_allocation_count;
+        if (totalOperations > 0) {
+            uint32_t reuseRatio = (pFile->space_reuse_count * 100) / totalOperations;
+            reuseEfficiencyScore = (100 - reuseRatio) / 2; // 0-50 points (lower reuse = higher fragmentation)
+        }
+        
+        pFile->fragmentation_score = wastedSpaceScore + reuseEfficiencyScore;
+        if (pFile->fragmentation_score > 100) pFile->fragmentation_score = 100;
+    } else {
+        pFile->fragmentation_score = 0;
+    }
+    
+    CCVFS_DEBUG("Space tracking updated: allocated=%llu, used=%llu, fragmentation=%u%%, "
+               "reuse=%u, expansion=%u, new=%u", 
+               (unsigned long long)totalAllocated, (unsigned long long)totalUsed, 
+               pFile->fragmentation_score, pFile->space_reuse_count, 
+               pFile->space_expansion_count, pFile->new_allocation_count);
+}
+
 int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     const unsigned char *data = (const unsigned char*)zBuf;

@@ -273,7 +273,15 @@ int ccvfs_init_header(CCVFSFile *pFile, CCVFS *pVfs) {
     
     pFile->header_loaded = 1;
     
-    CCVFS_DEBUG("Initialized new CCVFS header");
+    // Initialize space utilization tracking
+    pFile->total_allocated_space = 0;
+    pFile->total_used_space = 0;
+    pFile->fragmentation_score = 0;
+    pFile->space_reuse_count = 0;
+    pFile->space_expansion_count = 0;
+    pFile->new_allocation_count = 0;
+    
+    CCVFS_DEBUG("Initialized new CCVFS header with space tracking");
     return SQLITE_OK;
 }
 
