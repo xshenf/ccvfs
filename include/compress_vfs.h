@@ -152,33 +152,13 @@ typedef struct {
  *   pRootVfs - Underlying VFS (usually the default VFS)
  *   zCompressType - Compression algorithm type
  *   zEncryptType - Encryption algorithm type
+ *   blockSize - Block size in bytes (1KB - 1MB), 0 for default (64KB)
  *   flags - Creation flags (CCVFS_CREATE_*)
  * Return value:
  *   SQLITE_OK - Success
  *   Other values - Error code
  */
 int sqlite3_ccvfs_create(
-    const char *zVfsName,
-    sqlite3_vfs *pRootVfs,
-    const char *zCompressType,
-    const char *zEncryptType,
-    uint32_t flags
-);
-
-/*
- * Register compression and encryption VFS module with custom block size
- * Parameters:
- *   zVfsName - Name of the new VFS
- *   pRootVfs - Underlying VFS (usually the default VFS)
- *   zCompressType - Compression algorithm type
- *   zEncryptType - Encryption algorithm type
- *   blockSize - Block size in bytes (1KB - 1MB)
- *   flags - Creation flags (CCVFS_CREATE_*)
- * Return value:
- *   SQLITE_OK - Success
- *   Other values - Error code
- */
-int sqlite3_ccvfs_create_with_block_size(
     const char *zVfsName,
     sqlite3_vfs *pRootVfs,
     const char *zCompressType,
@@ -251,6 +231,13 @@ typedef struct {
 } CCVFSStats;
 
 int sqlite3_ccvfs_get_stats(const char *compressed_db, CCVFSStats *stats);
+
+/*
+ * Convenience macro for backward compatibility
+ * Creates VFS with default 64KB block size
+ */
+#define sqlite3_ccvfs_create_default(zVfsName, pRootVfs, zCompressType, zEncryptType, flags) \
+    sqlite3_ccvfs_create(zVfsName, pRootVfs, zCompressType, zEncryptType, 0, flags)
 
 #ifdef __cplusplus
 }  /* extern "C" */

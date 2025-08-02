@@ -37,7 +37,7 @@ int test_basic_functionality(const char* algorithm) {
     remove(db_name);
     
     // Create VFS
-    int rc = sqlite3_ccvfs_create(vfs_name, NULL, algorithm, NULL, CCVFS_CREATE_REALTIME);
+    int rc = sqlite3_ccvfs_create(vfs_name, NULL, algorithm, NULL, 0, CCVFS_CREATE_REALTIME);
     if (rc != SQLITE_OK) {
         printf("❌ Failed to create VFS: %d\n", rc);
         return 0;

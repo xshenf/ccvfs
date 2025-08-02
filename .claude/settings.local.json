@@ -39,7 +39,9 @@
       "Bash(sqlite3:*)",
       "Bash(./simple_db_test.exe)",
       "Bash(echo:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(grep -l \"sqlite3_ccvfs_create.*CCVFS_CREATE_REALTIME\" *.c)",
+      "Bash(sed:*)"
     ],
     "deny": []
   }

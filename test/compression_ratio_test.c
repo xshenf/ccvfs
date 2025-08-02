@@ -313,7 +313,7 @@ int main() {
         snprintf(db_name, sizeof(db_name), "large_%s.db", algo);
         
         // Create VFS
-        int rc = sqlite3_ccvfs_create(vfs_name, NULL, algo, NULL, CCVFS_CREATE_REALTIME);
+        int rc = sqlite3_ccvfs_create(vfs_name, NULL, algo, NULL, 0, CCVFS_CREATE_REALTIME);
         if (rc != SQLITE_OK) {
             printf("❌ Failed to create %s VFS: %d\n", algo, rc);
             continue;

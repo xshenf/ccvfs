@@ -90,7 +90,7 @@ int test_large_database() {
     ccvfs_init_builtin_algorithms();
     
     // Create VFS with zlib compression
-    int rc = sqlite3_ccvfs_create("large_test_vfs", NULL, "zlib", NULL, CCVFS_CREATE_REALTIME);
+    int rc = sqlite3_ccvfs_create("large_test_vfs", NULL, "zlib", NULL, 0, CCVFS_CREATE_REALTIME);
     if (rc != SQLITE_OK) {
         printf("❌ VFS creation failed: %d\n", rc);
         return 0;

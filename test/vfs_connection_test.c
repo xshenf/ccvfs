@@ -46,7 +46,7 @@ int test_vfs_connection() {
     ccvfs_init_builtin_algorithms();
     
     // Create VFS
-    int rc = sqlite3_ccvfs_create("test_vfs", NULL, "zlib", NULL, CCVFS_CREATE_REALTIME);
+    int rc = sqlite3_ccvfs_create("test_vfs", NULL, "zlib", NULL, 4096, CCVFS_CREATE_REALTIME);
     if (rc != SQLITE_OK) {
         printf("❌ VFS creation failed: %d\n", rc);
         return 0;

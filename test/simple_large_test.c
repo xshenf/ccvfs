@@ -53,7 +53,7 @@ int test_simple_large_database() {
     ccvfs_init_builtin_algorithms();
     
     // Create VFS
-    int rc = sqlite3_ccvfs_create("simple_large_vfs", NULL, "zlib", NULL, CCVFS_CREATE_REALTIME);
+    int rc = sqlite3_ccvfs_create("simple_large_vfs", NULL, "zlib", NULL, 0, CCVFS_CREATE_REALTIME);
     if (rc != SQLITE_OK) {
         printf("❌ VFS creation failed: %d\n", rc);
         return 0;

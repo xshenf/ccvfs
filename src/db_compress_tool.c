@@ -89,7 +89,7 @@ int sqlite3_ccvfs_compress_database(
     
     // Create CCVFS for compression
     rc = sqlite3_ccvfs_create("compress_vfs", NULL, compress_algorithm, encrypt_algorithm, 
-                              CCVFS_CREATE_OFFLINE);
+                              0, CCVFS_CREATE_OFFLINE);
     if (rc != SQLITE_OK) {
         printf("错误: 创建压缩VFS失败: %d\n", rc);
         return rc;
@@ -281,7 +281,7 @@ int sqlite3_ccvfs_decompress_database(
            compress_alg ? compress_alg : "无", 
            encrypt_alg ? encrypt_alg : "无");
     
-    rc = sqlite3_ccvfs_create("decompress_vfs", NULL, compress_alg, encrypt_alg, 0);
+    rc = sqlite3_ccvfs_create("decompress_vfs", NULL, compress_alg, encrypt_alg, 0, 0);
     if (rc != SQLITE_OK) {
         printf("错误: 创建解压VFS失败: %d\n", rc);
         return rc;
@@ -552,9 +552,9 @@ int sqlite3_ccvfs_compress_database_with_block_size(
     printf("源文件大小: %ld 字节\n", source_size);
     
     // Create CCVFS for compression with custom block size
-    rc = sqlite3_ccvfs_create_with_block_size("compress_vfs_custom", NULL, 
-                                              compress_algorithm, encrypt_algorithm, 
-                                              block_size, CCVFS_CREATE_OFFLINE);
+    rc = sqlite3_ccvfs_create("compress_vfs_custom", NULL, 
+                              compress_algorithm, encrypt_algorithm, 
+                              block_size, CCVFS_CREATE_OFFLINE);
     if (rc != SQLITE_OK) {
         printf("错误: 创建压缩VFS失败: %d\n", rc);
         return rc;
