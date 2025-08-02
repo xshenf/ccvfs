@@ -204,12 +204,20 @@ int sqlite3_ccvfs_compress_database(
     
     // Display compression results
     if (target_size > 0) {
-        double compression_ratio = (double)(source_size - target_size) * 100.0 / source_size;
+        double compression_ratio;
+        long space_saved = source_size - target_size;
+        
+        if (source_size > 0 && target_size <= source_size) {
+            compression_ratio = (double)(source_size - target_size) * 100.0 / source_size;
+        } else {
+            compression_ratio = 0.0; // No compression benefit or file grew larger
+        }
+        
         printf("\n压缩完成!\n");
         printf("原始大小: %ld 字节\n", source_size);
         printf("压缩后大小: %ld 字节\n", target_size);
         printf("压缩比: %.2f%%\n", compression_ratio);
-        printf("节省空间: %ld 字节\n", source_size - target_size);
+        printf("节省空间: %ld 字节\n", space_saved);
         printf("用时: %ld 秒\n", end_time - start_time);
     } else {
         printf("警告: 无法获取压缩文件大小\n");
@@ -672,12 +680,20 @@ int sqlite3_ccvfs_compress_database_with_block_size(
     
     // Display compression results
     if (target_size > 0) {
-        double compression_ratio = (double)(source_size - target_size) * 100.0 / source_size;
+        double compression_ratio;
+        long space_saved = source_size - target_size;
+        
+        if (source_size > 0 && target_size <= source_size) {
+            compression_ratio = (double)(source_size - target_size) * 100.0 / source_size;
+        } else {
+            compression_ratio = 0.0; // No compression benefit or file grew larger
+        }
+        
         printf("\n压缩完成!\n");
         printf("原始大小: %ld 字节\n", source_size);
         printf("压缩后大小: %ld 字节\n", target_size);
         printf("压缩比: %.2f%%\n", compression_ratio);
-        printf("节省空间: %ld 字节\n", source_size - target_size);
+        printf("节省空间: %ld 字节\n", space_saved);
         printf("块大小: %u KB\n", block_size / 1024);
         printf("用时: %ld 秒\n", end_time - start_time);
     } else {

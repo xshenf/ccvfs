@@ -39,8 +39,8 @@ int ccvfsIoClose(sqlite3_file *pFile) {
     CCVFS_DEBUG("Closing CCVFS file");
     
     if (p->pReal) {
-        // Save block index before closing
-        if (p->pBlockIndex && p->header_loaded) {
+        // Save block index and header before closing (only for writable files)
+        if (p->pBlockIndex && p->header_loaded && !(p->open_flags & SQLITE_OPEN_READONLY)) {
             int saveRc = ccvfs_save_block_index(p);
             if (saveRc != SQLITE_OK) {
                 CCVFS_ERROR("Failed to save block index: %d", saveRc);
@@ -161,6 +161,17 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
     if (checksum != pIndex->checksum) {
         CCVFS_ERROR("Block %u checksum mismatch: expected 0x%08x, got 0x%08x", 
                    blockNum, pIndex->checksum, checksum);
+        CCVFS_ERROR("Block %u details: phys_offset=%llu, comp_size=%u, orig_size=%u, flags=0x%x", 
+                   blockNum, pIndex->physical_offset, pIndex->compressed_size, 
+                   pIndex->original_size, pIndex->flags);
+        
+        // Show first few bytes of corrupted data for debugging
+        CCVFS_ERROR("First 16 bytes of block data: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                   compressedData[0], compressedData[1], compressedData[2], compressedData[3],
+                   compressedData[4], compressedData[5], compressedData[6], compressedData[7],
+                   compressedData[8], compressedData[9], compressedData[10], compressedData[11],
+                   compressedData[12], compressedData[13], compressedData[14], compressedData[15]);
+        
         sqlite3_free(compressedData);
         return SQLITE_CORRUPT;
     }
@@ -455,21 +466,20 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
     // Determine write offset: reuse existing block location or allocate new space
     sqlite3_int64 writeOffset;
     
-    // Check if block already exists and can be reused
+    // Check if block already exists and can be reused safely
     if (pIndex->physical_offset != 0) {
         uint32_t existingSpace = pIndex->compressed_size;
-        // Use a threshold to decide reuse vs new allocation
-        // Reuse if new size is within 25% larger than existing space, or if existing space is much larger
-        if (compressedSize <= existingSpace || 
-            (compressedSize <= existingSpace * 1.25) ||
-            (existingSpace >= compressedSize * 2)) {
-            // Reuse existing block location
+        
+        // SAFE REUSE: Only reuse if new data fits exactly within existing space
+        // This prevents overwriting adjacent blocks
+        if (compressedSize <= existingSpace) {
+            // Safe to reuse - new data fits within existing boundaries
             writeOffset = pIndex->physical_offset;
-            CCVFS_DEBUG("Reusing existing block location at offset %llu (new=%u, existing=%u)", 
+            CCVFS_DEBUG("Safely reusing existing block location at offset %llu (new=%u, existing=%u)", 
                        (unsigned long long)writeOffset, compressedSize, existingSpace);
         } else {
-            // Size difference too large, allocate new space
-            CCVFS_DEBUG("Size increase too large (new=%u vs existing=%u), allocating new space", 
+            // New data is larger - must allocate new space to prevent corruption
+            CCVFS_DEBUG("New data too large for existing space (new=%u vs existing=%u), allocating new space", 
                        compressedSize, existingSpace);
             goto allocate_new_space;
         }

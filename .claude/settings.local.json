@@ -48,7 +48,11 @@
       "Bash(CCVFS_DEBUG=1 ./db_tool.exe compress -b 4K debug_test.db debug_test_compressed.ccvfs)",
       "Bash(grep:*)",
       "Bash(CCVFS_DEBUG=1 ./simple_db_test.exe)",
-      "Bash(CCVFS_DEBUG=1 ./core_algorithm_test.exe)"
+      "Bash(CCVFS_DEBUG=1 ./core_algorithm_test.exe)",
+      "Bash(od:*)",
+      "Bash(set CCVFS_DEBUG=1)",
+      "Bash(E:/workspace/sqlitecc/cmake-build-release/simple_large_test.exe)",
+      "Bash(timeout:*)"
     ],
     "deny": []
   }

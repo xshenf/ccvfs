@@ -10,6 +10,9 @@ void cleanup_test_files() {
     if (remove("simple_test.db") == 0) {
         printf("   Removed simple_test.db\n");
     }
+    if (remove("simple_test.ccvfs") == 0) {
+        printf("   Removed simple_test.ccvfs\n");
+    }
     
     // Remove journal file
     if (remove("simple_test.db-journal") == 0) {
