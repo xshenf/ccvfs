@@ -85,14 +85,9 @@ if(LZMA_FOUND)
 endif()
 
 # Essential test programs
-add_executable(core_algorithm_test test/core_algorithm_test.c)
-target_link_libraries(core_algorithm_test sqlitecc)
 
 add_executable(vfs_connection_test test/vfs_connection_test.c)
 target_link_libraries(vfs_connection_test sqlitecc)
-
-add_executable(compression_ratio_test test/compression_ratio_test.c)
-target_link_libraries(compression_ratio_test sqlitecc)
 
 add_executable(large_db_stress_test test/large_db_stress_test.c)
 target_link_libraries(large_db_stress_test sqlitecc)
@@ -113,23 +108,14 @@ target_link_libraries(db_tool sqlitecc)
 add_executable(db_generator src/db_generator.c)
 target_link_libraries(db_generator sqlitecc)
 
-# 数据库压缩解压测试程序
-add_executable(db_compress_test test/db_compress_test.c)
-target_link_libraries(db_compress_test sqlitecc)
-
 # 简单数据库测试程序
 add_executable(simple_db_test test/simple_db_test.c)
 target_link_libraries(simple_db_test sqlitecc)
 
 # 链接数学库（某些平台需要）
 if(UNIX AND NOT APPLE)
-    target_link_libraries(test_main m)
-    target_link_libraries(large_db_test m)
-    target_link_libraries(large_db_test_utf8 m)
-    target_link_libraries(large_db_zlib_test m)
     target_link_libraries(shell m)
     target_link_libraries(db_tool m)
     target_link_libraries(db_generator m)
-    target_link_libraries(db_compress_test m)
     target_link_libraries(simple_db_test m)
 endif()

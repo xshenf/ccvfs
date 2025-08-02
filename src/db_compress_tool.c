@@ -173,8 +173,11 @@ int sqlite3_ccvfs_compress_database(
             target_size = get_file_size(compressed_db);
             header.compressed_file_size = (uint64_t)target_size;
             
-            if (source_size > 0) {
+            if (source_size > 0 && target_size <= source_size) {
                 header.compression_ratio = (uint32_t)((source_size - target_size) * 100 / source_size);
+            } else if (source_size > 0) {
+                // Compression made file larger, set ratio to 0 (no compression benefit)
+                header.compression_ratio = 0;
             } else {
                 header.compression_ratio = 0;
             }
@@ -638,8 +641,11 @@ int sqlite3_ccvfs_compress_database_with_block_size(
             target_size = get_file_size(compressed_db);
             header.compressed_file_size = (uint64_t)target_size;
             
-            if (source_size > 0) {
+            if (source_size > 0 && target_size <= source_size) {
                 header.compression_ratio = (uint32_t)((source_size - target_size) * 100 / source_size);
+            } else if (source_size > 0) {
+                // Compression made file larger, set ratio to 0 (no compression benefit)
+                header.compression_ratio = 0;
             } else {
                 header.compression_ratio = 0;
             }

@@ -156,13 +156,13 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
         return rc;
     }
     
-    // Verify checksum (temporarily disabled to focus on block mapping)
+    // Verify checksum
     uint32_t checksum = ccvfs_crc32(compressedData, pIndex->compressed_size);
     if (checksum != pIndex->checksum) {
-        CCVFS_DEBUG("Block %u checksum mismatch: expected 0x%08x, got 0x%08x (ignoring for debugging)", 
+        CCVFS_ERROR("Block %u checksum mismatch: expected 0x%08x, got 0x%08x", 
                    blockNum, pIndex->checksum, checksum);
-        // sqlite3_free(compressedData);
-        // return SQLITE_CORRUPT;  // Temporarily disabled
+        sqlite3_free(compressedData);
+        return SQLITE_CORRUPT;
     }
     
     // Decrypt if needed
@@ -191,10 +191,27 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
     
     // Decompress if needed
     if (pFile->pOwner->pCompressAlg && (pIndex->flags & CCVFS_BLOCK_COMPRESSED)) {
+        // Validate compressed size before decompression
+        if (pIndex->compressed_size == 0 || pIndex->original_size == 0) {
+            CCVFS_ERROR("Invalid block %u sizes: compressed=%u, original=%u", 
+                       blockNum, pIndex->compressed_size, pIndex->original_size);
+            if (decryptedData != compressedData) sqlite3_free(decryptedData);
+            return SQLITE_CORRUPT;
+        }
+        
         rc = pFile->pOwner->pCompressAlg->decompress(decryptedData, pIndex->compressed_size,
                                                    buffer, bufferSize);
         if (rc < 0) {
-            CCVFS_ERROR("Failed to decompress block %u: %d", blockNum, rc);
+            CCVFS_ERROR("Failed to decompress block %u: %d (compressed_size=%u, original_size=%u)", 
+                       blockNum, rc, pIndex->compressed_size, pIndex->original_size);
+            if (decryptedData != compressedData) sqlite3_free(decryptedData);
+            return SQLITE_CORRUPT;
+        }
+        
+        // Validate decompressed size
+        if ((uint32_t)rc != pIndex->original_size) {
+            CCVFS_ERROR("Block %u decompressed size mismatch: expected %u, got %d", 
+                       blockNum, pIndex->original_size, rc);
             if (decryptedData != compressedData) sqlite3_free(decryptedData);
             return SQLITE_CORRUPT;
         }
