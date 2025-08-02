@@ -26,6 +26,30 @@ int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile,
     pCcvfsFile->index_dirty = 0;
     pCcvfsFile->index_capacity = 0;
     
+    // Copy filename for debugging purposes
+    if (zName) {
+        // Extract just the filename part (without path)
+        const char *lastSlash = strrchr(zName, '/');
+        const char *lastBackslash = strrchr(zName, '\\');
+        const char *filenameStart = zName;
+        
+        // Find the last path separator
+        if (lastSlash && lastSlash > filenameStart) {
+            filenameStart = lastSlash + 1;
+        }
+        if (lastBackslash && lastBackslash > filenameStart) {
+            filenameStart = lastBackslash + 1;
+        }
+        
+        size_t nameLen = strlen(filenameStart);
+        pCcvfsFile->filename = (char*)sqlite3_malloc((int)(nameLen + 1));
+        if (pCcvfsFile->filename) {
+            strcpy(pCcvfsFile->filename, filenameStart);
+        }
+    } else {
+        pCcvfsFile->filename = NULL;
+    }
+    
     // Allocate space for the real file structure
     pRealFile = (sqlite3_file*)&pCcvfsFile[1];
     

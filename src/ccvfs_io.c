@@ -68,8 +68,15 @@ int ccvfsIoClose(sqlite3_file *pFile) {
         sqlite3_free(p->pBlockIndex);
         p->pBlockIndex = NULL;
     }
+
+    CCVFS_INFO("File closed: %s", p->filename ? p->filename : "(null)");
+
+    // Free filename
+    if (p->filename) {
+        sqlite3_free(p->filename);
+        p->filename = NULL;
+    }
     
-    CCVFS_INFO("CCVFS file closed");
     return rc;
 }
 
@@ -224,7 +231,7 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
     int bytesRead = 0;
     int rc;
     
-    CCVFS_DEBUG("=== READING %d bytes at offset %lld ===", iAmt, iOfst);
+    CCVFS_DEBUG("=== READING %d bytes at offset %lld from file: %s ===", iAmt, iOfst, p->filename ? p->filename : "unknown");
     
     // If not a CCVFS file, read directly from underlying file
     if (!p->is_ccvfs_file) {
@@ -524,7 +531,7 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
     int bytesWritten = 0;
     int rc;
     
-    CCVFS_DEBUG("=== WRITING %d bytes at offset %lld ===", iAmt, iOfst);
+    CCVFS_DEBUG("=== WRITING %d bytes at offset %lld to file: %s ===", iAmt, iOfst, p->filename ? p->filename : "unknown");
     
     // Initialize CCVFS header for new CCVFS files on first write
     if (p->is_ccvfs_file && !p->header_loaded && iOfst == 0) {
