@@ -43,7 +43,8 @@
       "Bash(grep -l \"sqlite3_ccvfs_create.*CCVFS_CREATE_REALTIME\" *.c)",
       "Bash(sed:*)",
       "Bash(./db_generator.exe --help)",
-      "Bash(./db_generator.exe:*)"
+      "Bash(./db_generator.exe:*)",
+      "Bash(mkdir:*)"
     ],
     "deny": []
   }

@@ -428,24 +428,39 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
     // Calculate checksum
     uint32_t checksum = ccvfs_crc32(dataToWrite, compressedSize);
     
-    // Get file size to append new block (after reserved index table space)
-    sqlite3_int64 fileSize;
-    int rc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
-    if (rc != SQLITE_OK) {
-        CCVFS_ERROR("Failed to get file size: %d", rc);
-        if (encryptedData) sqlite3_free(encryptedData);
-        if (compressedData) sqlite3_free(compressedData);
-        return rc;
+    // Determine write offset: reuse existing block location or allocate new space
+    sqlite3_int64 writeOffset;
+    
+    // Check if block already exists and can be reused
+    if (pIndex->physical_offset != 0 && pIndex->compressed_size >= compressedSize) {
+        // Reuse existing block location if the new data fits
+        writeOffset = pIndex->physical_offset;
+        CCVFS_DEBUG("Reusing existing block location at offset %llu (size %u >= %u)", 
+                   (unsigned long long)writeOffset, pIndex->compressed_size, compressedSize);
+    } else {
+        // Need new space - append to end of file
+        sqlite3_int64 fileSize;
+        int sizeRc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
+        if (sizeRc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to get file size: %d", sizeRc);
+            if (encryptedData) sqlite3_free(encryptedData);
+            if (compressedData) sqlite3_free(compressedData);
+            return sizeRc;
+        }
+        
+        // Ensure we write data blocks after the reserved index table space
+        writeOffset = fileSize;
+        if (writeOffset < CCVFS_DATA_BLOCKS_OFFSET) {
+            writeOffset = CCVFS_DATA_BLOCKS_OFFSET;
+            CCVFS_DEBUG("Adjusting write offset to %llu (after reserved index space)", 
+                       (unsigned long long)writeOffset);
+        } else {
+            CCVFS_DEBUG("Allocating new block at end of file: offset %llu", 
+                       (unsigned long long)writeOffset);
+        }
     }
     
-    // Ensure we write data blocks after the reserved index table space
-    sqlite3_int64 writeOffset = fileSize;
-    if (writeOffset < CCVFS_DATA_BLOCKS_OFFSET) {
-        writeOffset = CCVFS_DATA_BLOCKS_OFFSET;
-        CCVFS_DEBUG("Adjusting write offset to %llu (after reserved index space)", 
-                   (unsigned long long)writeOffset);
-    }
-    rc = pFile->pReal->pMethods->xWrite(pFile->pReal, dataToWrite, compressedSize, writeOffset);
+    int rc = pFile->pReal->pMethods->xWrite(pFile->pReal, dataToWrite, compressedSize, writeOffset);
     if (rc != SQLITE_OK) {
         CCVFS_ERROR("Failed to write block data: %d", rc);
         if (encryptedData) sqlite3_free(encryptedData);
