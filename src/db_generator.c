@@ -1,5 +1,5 @@
 
-#include "compress_vfs.h"
+#include "ccvfs.h"
 #include "sqlite3.h"
 #include <stdio.h>
 #include <stdlib.h>

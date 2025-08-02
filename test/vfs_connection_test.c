@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "sqlite3.h"
-#include "compress_vfs.h"
+#include "ccvfs.h"
 #include "ccvfs_algorithm.h"
 
 // Clean up old test files

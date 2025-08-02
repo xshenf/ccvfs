@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include "../include/compress_vfs.h"
+#include "../include/ccvfs.h"
 #include "../sqlite3/sqlite3.h"
 
 /* 

@@ -9,7 +9,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include "sqlite3.h"
-#include "compress_vfs.h"
+#include "ccvfs.h"
 #include "ccvfs_algorithm.h"
 
 // Get file size

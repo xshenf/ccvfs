@@ -1,7 +1,7 @@
 #ifndef CCVFS_INTERNAL_H
 #define CCVFS_INTERNAL_H
 
-#include "compress_vfs.h"
+#include "ccvfs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -54,8 +54,8 @@ set(SQLITE3_SRC
 )
 
 # 压缩VFS源文件
-set(CCVFS_SRC 
-    src/compress_vfs.c
+set(CCVFS_SRC
+        src/ccvfs.c
     src/ccvfs_core.c
     src/ccvfs_io.c  
     src/ccvfs_algorithm.c
