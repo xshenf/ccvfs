@@ -3,9 +3,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+void cleanup_test_files() {
+    printf("🧹 Cleaning up old test files...\n");
+    
+    // Remove main database file
+    if (remove("simple_test.db") == 0) {
+        printf("   Removed simple_test.db\n");
+    }
+    
+    // Remove journal file
+    if (remove("simple_test.db-journal") == 0) {
+        printf("   Removed simple_test.db-journal\n");
+    }
+    
+    // Remove WAL file (if exists)
+    if (remove("simple_test.db-wal") == 0) {
+        printf("   Removed simple_test.db-wal\n");
+    }
+    
+    // Remove SHM file (if exists)
+    if (remove("simple_test.db-shm") == 0) {
+        printf("   Removed simple_test.db-shm\n");
+    }
+    
+    printf("✅ Cleanup completed\n\n");
+}
+
+
 int main() {
     printf("简单的数据库压缩解压测试\n");
     printf("==============================\n");
+
+    cleanup_test_files();
     
     sqlite3 *db;
     int rc;
