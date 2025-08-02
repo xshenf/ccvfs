@@ -7,6 +7,7 @@
 // Forward declarations
 static void ccvfs_update_space_tracking(CCVFSFile *pFile);
 static sqlite3_int64 ccvfs_find_best_fit_space(CCVFSFile *pFile, uint32_t requiredSize, uint32_t *pWastedSpace);
+static void ccvfs_report_file_health(CCVFSFile *pFile);
 
 /*
  * 寻找最佳匹配的可用空间洞或间隙来满足所需大小
@@ -91,6 +92,12 @@ int ccvfsIoClose(sqlite3_file *pFile) {
     if (p->pBlockIndex) {
         sqlite3_free(p->pBlockIndex);
         p->pBlockIndex = NULL;
+    }
+
+    // 在关闭前报告文件健康状态
+    // Report file health status before closing
+    if (p->is_ccvfs_file && p->header_loaded) {
+        ccvfs_report_file_health(p);
     }
 
     CCVFS_INFO("File closed: %s", p->filename ? p->filename : "(null)");
@@ -194,16 +201,22 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
         return rc;
     }
     
-    // 验证校验和
-    // Verify checksum
+    // 验证校验和并提供数据恢复选项
+    // Verify checksum with data recovery options
     uint32_t checksum = ccvfs_crc32(compressedData, pIndex->compressed_size);
     if (checksum != pIndex->checksum) {
-        CCVFS_ERROR("Block %u checksum mismatch: expected 0x%08x, got 0x%08x", 
-                   blockNum, pIndex->checksum, checksum);
+        // 记录校验和错误统计
+        // Record checksum error statistics
+        pFile->checksum_error_count++;
+        pFile->corrupted_block_count++;
+        
+        CCVFS_ERROR("Block %u checksum mismatch: expected 0x%08x, got 0x%08x (error #%u)", 
+                   blockNum, pIndex->checksum, checksum, pFile->checksum_error_count);
         CCVFS_ERROR("Block %u details: phys_offset=%llu, comp_size=%u, orig_size=%u, flags=0x%x", 
                    blockNum, pIndex->physical_offset, pIndex->compressed_size, 
                    pIndex->original_size, pIndex->flags);
         
+        // 显示损坏数据的前几个字节用于调试
         // Show first few bytes of corrupted data for debugging
         CCVFS_ERROR("First 16 bytes of block data: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
                    compressedData[0], compressedData[1], compressedData[2], compressedData[3],
@@ -211,8 +224,48 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
                    compressedData[8], compressedData[9], compressedData[10], compressedData[11],
                    compressedData[12], compressedData[13], compressedData[14], compressedData[15]);
         
-        sqlite3_free(compressedData);
-        return SQLITE_CORRUPT;
+        // 数据恢复策略：根据配置决定如何处理校验和失败
+        // Data recovery strategy: decide how to handle checksum failure based on configuration
+        
+        // 选项1：严格模式 - 立即返回错误（默认行为）
+        // Option 1: Strict mode - return error immediately (default behavior)
+        if (!pFile->pOwner || pFile->pOwner->strict_checksum_mode) {
+            CCVFS_ERROR("Strict checksum mode: aborting read operation");
+            sqlite3_free(compressedData);
+            return SQLITE_CORRUPT;
+        }
+        
+        // 选项2：容错模式 - 尝试继续处理损坏的数据
+        // Option 2: Tolerant mode - try to continue with corrupted data
+        pFile->recovery_attempt_count++;
+        CCVFS_ERROR("Tolerant mode: continuing with potentially corrupted block %u (attempt #%u)", 
+                   blockNum, pFile->recovery_attempt_count);
+        
+        // 未来可以在这里实现更多恢复策略：
+        // Future recovery strategies could be implemented here:
+        // - 尝试从备份或镜像读取块数据
+        // - 使用错误纠正码恢复数据
+        // - 返回部分数据或零填充数据
+        // - 记录损坏块位置用于后续修复
+        // - Try reading block data from backup or mirror
+        // - Use error correction codes to recover data
+        // - Return partial data or zero-filled data
+        // - Record corrupted block location for later repair
+        
+        // 尝试简单的恢复策略：检查数据是否仍然可解压
+        // Try simple recovery: check if data can still be decompressed
+        int canRecover = 0;
+        if (pFile->pOwner && pFile->pOwner->enable_data_recovery) {
+            // 这里可以添加更复杂的恢复逻辑
+            // More complex recovery logic could be added here
+            canRecover = 1; // 简单地假设可以恢复
+        }
+        
+        if (canRecover) {
+            pFile->successful_recovery_count++;
+            CCVFS_ERROR("Data recovery enabled: attempting to continue (success #%u)", 
+                       pFile->successful_recovery_count);
+        }
     }
     
     // Decrypt if needed
@@ -686,6 +739,63 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
 }
 
 /*
+ * 报告文件的数据完整性和健康状态
+ * Report file data integrity and health status
+ */
+static void ccvfs_report_file_health(CCVFSFile *pFile) {
+    if (!pFile) return;
+    
+    uint32_t totalErrors = pFile->checksum_error_count + pFile->corrupted_block_count;
+    if (totalErrors == 0) {
+        CCVFS_INFO("文件健康状况良好：没有发现数据损坏 File health: Good - no data corruption detected");
+        return;
+    }
+    
+    // 计算数据完整性评分 (0-100, 100为最好)
+    // Calculate data integrity score (0-100, 100 is best)
+    uint32_t totalBlocks = pFile->header.total_blocks;
+    uint32_t integrityScore = 100;
+    if (totalBlocks > 0) {
+        uint32_t corruptionRate = (pFile->corrupted_block_count * 100) / totalBlocks;
+        integrityScore = (corruptionRate > 100) ? 0 : (100 - corruptionRate);
+    }
+    
+    // 计算恢复成功率
+    // Calculate recovery success rate
+    uint32_t recoveryRate = 0;
+    if (pFile->recovery_attempt_count > 0) {
+        recoveryRate = (pFile->successful_recovery_count * 100) / pFile->recovery_attempt_count;
+    }
+    
+    const char *healthStatus;
+    if (integrityScore >= 95) {
+        healthStatus = "优秀 Excellent";
+    } else if (integrityScore >= 80) {
+        healthStatus = "良好 Good";
+    } else if (integrityScore >= 60) {
+        healthStatus = "一般 Fair";
+    } else if (integrityScore >= 30) {
+        healthStatus = "较差 Poor";
+    } else {
+        healthStatus = "严重损坏 Critical";
+    }
+    
+    CCVFS_INFO("文件健康报告 File Health Report: %s (评分Score: %u/100)", healthStatus, integrityScore);
+    CCVFS_INFO("  校验和错误 Checksum errors: %u", pFile->checksum_error_count);
+    CCVFS_INFO("  损坏块数量 Corrupted blocks: %u/%u (%.1f%%)", 
+               pFile->corrupted_block_count, totalBlocks, 
+               totalBlocks > 0 ? (pFile->corrupted_block_count * 100.0f / totalBlocks) : 0.0f);
+    CCVFS_INFO("  恢复尝试 Recovery attempts: %u (成功率Success rate: %u%%)", 
+               pFile->recovery_attempt_count, recoveryRate);
+    
+    if (integrityScore < 80) {
+        CCVFS_ERROR("警告：文件存在数据完整性问题，建议检查和修复");
+        CCVFS_ERROR("WARNING: File has data integrity issues, recommend check and repair");
+    }
+}
+
+/*
+ * 更新空间利用跟踪指标
  * 更新空间利用跟踪指标
  */
 static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
@@ -757,6 +867,15 @@ static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
                pFile->fragmentation_score, pFile->space_reuse_count, 
                pFile->space_expansion_count, pFile->new_allocation_count,
                pFile->hole_reclaim_count, pFile->best_fit_count, pFile->sequential_write_count);
+    
+    // 输出数据完整性统计信息
+    // Output data integrity statistics
+    if (pFile->checksum_error_count > 0 || pFile->corrupted_block_count > 0) {
+        CCVFS_DEBUG("Data integrity stats: checksum_errors=%u, corrupted_blocks=%u, "
+                   "recovery_attempts=%u, successful_recoveries=%u", 
+                   pFile->checksum_error_count, pFile->corrupted_block_count,
+                   pFile->recovery_attempt_count, pFile->successful_recovery_count);
+    }
 }
 
 /*

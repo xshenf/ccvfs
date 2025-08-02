@@ -44,6 +44,12 @@ typedef struct CCVFS {
     EncryptAlgorithm *pEncryptAlg;   /* Encryption algorithm implementation */
     uint32_t creation_flags;    /* Creation flags */
     uint32_t block_size;        /* Block size in bytes */
+    
+    // 数据完整性和错误处理配置
+    // Data integrity and error handling configuration
+    int strict_checksum_mode;   /* 严格校验和模式：1=严格，0=容错 Strict checksum mode: 1=strict, 0=tolerant */
+    int enable_data_recovery;   /* 启用数据恢复策略 Enable data recovery strategies */
+    int corruption_tolerance;   /* 数据损坏容忍级别 (0-100) Data corruption tolerance level (0-100) */
 } CCVFS;
 
 /*
@@ -75,6 +81,13 @@ typedef struct CCVFSFile {
     uint32_t best_fit_count;          /* Number of best-fit allocations */
     uint32_t sequential_write_count;  /* Number of sequential writes detected */
     uint32_t last_written_block;      /* Last block number written (for sequential detection) */
+    
+    // 数据完整性统计和错误跟踪
+    // Data integrity statistics and error tracking
+    uint32_t checksum_error_count;    /* 校验和错误次数 Number of checksum errors encountered */
+    uint32_t corrupted_block_count;   /* 损坏块数量 Number of corrupted blocks detected */
+    uint32_t recovery_attempt_count;  /* 数据恢复尝试次数 Number of data recovery attempts */
+    uint32_t successful_recovery_count; /* 成功恢复次数 Number of successful recoveries */
 } CCVFSFile;
 
 #ifdef __cplusplus
