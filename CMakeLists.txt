@@ -66,6 +66,7 @@ set(CCVFS_SRC
 # 主库
 add_library(sqlitecc STATIC ${SQLITE3_SRC} ${CCVFS_SRC})
 target_link_libraries(sqlitecc ZLIB::ZLIB)
+target_compile_definitions(sqlitecc PRIVATE SQLITE_ENABLE_CEROD=1)
 
 # 根据找到的库添加支持
 if(LZ4_FOUND)
@@ -98,9 +99,10 @@ target_link_libraries(large_db_stress_test sqlitecc)
 add_executable(simple_large_test test/simple_large_test.c)
 target_link_libraries(simple_large_test sqlitecc)
 
-# Shell程序
-add_executable(shell src/shell.c)
+# Shell程序 - 使用SQLite原始shell加上我们的扩展
+add_executable(shell sqlite3/shell.c src/shell.c)
 target_link_libraries(shell sqlitecc)
+target_compile_definitions(shell PRIVATE SQLITE_ENABLE_CEROD=1)
 
 # 链接数学库（某些平台需要）
 if(UNIX AND NOT APPLE)
