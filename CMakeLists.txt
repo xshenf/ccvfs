@@ -61,6 +61,7 @@ set(CCVFS_SRC
     src/ccvfs_algorithm.c
     src/ccvfs_block.c
     src/ccvfs_utils.c
+    src/db_compress_tool.c
 )
 
 # 主库
@@ -104,6 +105,18 @@ add_executable(shell sqlite3/shell.c src/shell.c)
 target_link_libraries(shell sqlitecc)
 target_compile_definitions(shell PRIVATE SQLITE_ENABLE_CEROD=1)
 
+# 数据库压缩解压工具
+add_executable(db_tool src/db_tool.c)
+target_link_libraries(db_tool sqlitecc)
+
+# 数据库压缩解压测试程序
+add_executable(db_compress_test test/db_compress_test.c)
+target_link_libraries(db_compress_test sqlitecc)
+
+# 简单数据库测试程序
+add_executable(simple_db_test test/simple_db_test.c)
+target_link_libraries(simple_db_test sqlitecc)
+
 # 链接数学库（某些平台需要）
 if(UNIX AND NOT APPLE)
     target_link_libraries(test_main m)
@@ -111,4 +124,7 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(large_db_test_utf8 m)
     target_link_libraries(large_db_zlib_test m)
     target_link_libraries(shell m)
+    target_link_libraries(db_tool m)
+    target_link_libraries(db_compress_test m)
+    target_link_libraries(simple_db_test m)
 endif()

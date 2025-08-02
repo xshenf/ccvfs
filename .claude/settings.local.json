@@ -33,7 +33,12 @@
       "Bash(./large_db_stress_test.exe)",
       "Bash(timeout 60 ./large_db_stress_test.exe)",
       "Bash(./simple_large_test.exe)",
-      "Bash(timeout 120 ./simple_large_test.exe)"
+      "Bash(timeout 120 ./simple_large_test.exe)",
+      "Bash(./db_tool.exe:*)",
+      "Bash(./db_compress_test.exe)",
+      "Bash(sqlite3:*)",
+      "Bash(./simple_db_test.exe)",
+      "Bash(echo:*)"
     ],
     "deny": []
   }
