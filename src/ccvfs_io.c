@@ -9,17 +9,21 @@ static void ccvfs_update_space_tracking(CCVFSFile *pFile);
 static sqlite3_int64 ccvfs_find_best_fit_space(CCVFSFile *pFile, uint32_t requiredSize, uint32_t *pWastedSpace);
 
 /*
+ * 寻找最佳匹配的可用空间洞或间隙来满足所需大小
+ * 暂时禁用：总是返回0以使用文件末尾分配策略，确保稳定性
  * Find the best fitting available space hole or gap for the required size
  * DISABLED: Always return 0 to use end-of-file allocation for stability
  */
 static sqlite3_int64 ccvfs_find_best_fit_space(CCVFSFile *pFile, uint32_t requiredSize, uint32_t *pWastedSpace) {
+    // 暂时完全禁用空洞检测算法
     // Disable hole detection completely for now
     *pWastedSpace = 0;
     return 0;
 }
 
 /*
- * IO Methods table
+ * IO方法表 - 定义了VFS层的所有文件操作接口
+ * IO Methods table - Defines all file operation interfaces for VFS layer
  */
 sqlite3_io_methods ccvfsIoMethods = {
     3,                              /* iVersion */
@@ -44,7 +48,10 @@ sqlite3_io_methods ccvfsIoMethods = {
 };
 
 /*
+ * 关闭文件并清理资源
+ * 保存块索引和文件头，释放内存，关闭底层文件
  * Close file and clean up resources
+ * Save block index and header, free memory, close underlying file
  */
 int ccvfsIoClose(sqlite3_file *pFile) {
     CCVFSFile *p = (CCVFSFile *)pFile;
@@ -53,6 +60,7 @@ int ccvfsIoClose(sqlite3_file *pFile) {
     CCVFS_DEBUG("Closing CCVFS file");
     
     if (p->pReal) {
+        // 关闭前保存块索引和文件头（仅对可写文件）
         // Save block index and header before closing (only for writable files)
         if (p->pBlockIndex && p->header_loaded && !(p->open_flags & SQLITE_OPEN_READONLY)) {
             int saveRc = ccvfs_save_block_index(p);
@@ -69,6 +77,7 @@ int ccvfsIoClose(sqlite3_file *pFile) {
             }
         }
         
+        // 关闭底层文件
         // Close underlying file
         int closeRc = p->pReal->pMethods->xClose(p->pReal);
         if (closeRc != SQLITE_OK) {
@@ -77,6 +86,7 @@ int ccvfsIoClose(sqlite3_file *pFile) {
         }
     }
     
+    // 释放块索引内存
     // Free block index
     if (p->pBlockIndex) {
         sqlite3_free(p->pBlockIndex);
@@ -95,7 +105,10 @@ int ccvfsIoClose(sqlite3_file *pFile) {
 }
 
 /*
+ * 根据文件偏移量获取块编号
+ * 计算公式：块编号 = 偏移量 / 块大小
  * Get block number from file offset
+ * Formula: block_number = offset / block_size
  */
 static uint32_t getBlockNumber(sqlite3_int64 offset, uint32_t blockSize) {
     if (blockSize == 0) {
@@ -106,7 +119,10 @@ static uint32_t getBlockNumber(sqlite3_int64 offset, uint32_t blockSize) {
 }
 
 /*
+ * 获取块内偏移量
+ * 计算公式：块内偏移 = 偏移量 % 块大小
  * Get offset within block
+ * Formula: block_offset = offset % block_size
  */
 static uint32_t getBlockOffset(sqlite3_int64 offset, uint32_t blockSize) {
     if (blockSize == 0) {
@@ -117,11 +133,15 @@ static uint32_t getBlockOffset(sqlite3_int64 offset, uint32_t blockSize) {
 }
 
 /*
+ * 从文件读取并解压一个数据块
+ * 处理流程：读取压缩数据 -> 校验和验证 -> 解密 -> 解压缩 -> 复制到缓冲区
  * Read and decompress a block from file
+ * Process flow: read compressed data -> checksum verification -> decrypt -> decompress -> copy to buffer
  */
 static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer, uint32_t bufferSize) {
     CCVFS_DEBUG("=== READING BLOCK %u ===", blockNum);
     
+    // 检查块索引是否已加载（应该在ccvfsOpen中已加载）
     // Check if block index is loaded (should already be loaded in ccvfsOpen)
     if (!pFile->pBlockIndex) {
         CCVFS_DEBUG("Block index not loaded, loading now");
@@ -132,6 +152,7 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
         }
     }
     
+    // 检查块编号有效性
     // Check block number validity
     if (blockNum >= pFile->header.total_blocks) {
         CCVFS_DEBUG("Block %u beyond total blocks %u, treating as zero (sparse)", 
@@ -146,6 +167,7 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
                blockNum, (unsigned long long)pIndex->physical_offset, 
                pIndex->compressed_size, pIndex->original_size, pIndex->flags);
     
+    // 如果块没有物理存储（稀疏块），返回零填充数据
     // If block has no physical storage (sparse), return zeros
     if (pIndex->physical_offset == 0 || (pIndex->flags & CCVFS_BLOCK_SPARSE)) {
         CCVFS_DEBUG("Block %u is sparse, returning zeros", blockNum);
@@ -153,6 +175,7 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
         return SQLITE_OK;
     }
     
+    // 为压缩数据分配临时缓冲区
     // Allocate temporary buffer for compressed data
     unsigned char *compressedData = sqlite3_malloc(pIndex->compressed_size);
     if (!compressedData) {
@@ -160,6 +183,7 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
         return SQLITE_NOMEM;
     }
     
+    // 读取压缩块数据
     // Read compressed block data
     int rc = pFile->pReal->pMethods->xRead(pFile->pReal, compressedData, 
                                           pIndex->compressed_size, 
@@ -170,6 +194,7 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
         return rc;
     }
     
+    // 验证校验和
     // Verify checksum
     uint32_t checksum = ccvfs_crc32(compressedData, pIndex->compressed_size);
     if (checksum != pIndex->checksum) {
@@ -193,6 +218,7 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
     // Decrypt if needed
     unsigned char *decryptedData = compressedData;
     if (pFile->pOwner->pEncryptAlg && (pIndex->flags & CCVFS_BLOCK_ENCRYPTED)) {
+        // 为解密数据专门分配缓冲区
         decryptedData = sqlite3_malloc(pIndex->compressed_size);
         if (!decryptedData) {
             CCVFS_ERROR("Failed to allocate memory for decrypted data");
@@ -200,6 +226,7 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
             return SQLITE_NOMEM;
         }
         
+        // 暂时使用简单密钥（实际实现中应该来自用户）
         // Use a simple key for now (in real implementation, this should come from user)
         unsigned char key[16] = "default_key_123";
         rc = pFile->pOwner->pEncryptAlg->decrypt(key, 16, compressedData, 
@@ -214,8 +241,10 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
         sqlite3_free(compressedData);
     }
     
+    // 如果需要则解压缩数据
     // Decompress if needed
     if (pFile->pOwner->pCompressAlg && (pIndex->flags & CCVFS_BLOCK_COMPRESSED)) {
+        // 解压前验证压缩大小
         // Validate compressed size before decompression
         if (pIndex->compressed_size == 0 || pIndex->original_size == 0) {
             CCVFS_ERROR("Invalid block %u sizes: compressed=%u, original=%u", 
@@ -233,6 +262,7 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
             return SQLITE_CORRUPT;
         }
         
+        // 验证解压后的大小
         // Validate decompressed size
         if ((uint32_t)rc != pIndex->original_size) {
             CCVFS_ERROR("Block %u decompressed size mismatch: expected %u, got %d", 
@@ -241,15 +271,18 @@ static int readBlock(CCVFSFile *pFile, uint32_t blockNum, unsigned char *buffer,
             return SQLITE_CORRUPT;
         }
         
+        // 用零填充剩余缓冲区空间
         // Fill remaining buffer with zeros
         if ((uint32_t)rc < bufferSize) {
             memset(buffer + rc, 0, bufferSize - rc);
         }
     } else {
+        // 无压缩，直接复制数据
         // No compression, copy data directly
         uint32_t copySize = (pIndex->original_size < bufferSize) ? pIndex->original_size : bufferSize;
         memcpy(buffer, decryptedData, copySize);
         
+        // 用零填充剩余缓冲区空间
         // Fill remaining buffer with zeros
         if (copySize < bufferSize) {
             memset(buffer + copySize, 0, bufferSize - copySize);
@@ -362,12 +395,16 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
 }
 
 /*
+ * 压缩并将一个块写入文件
+ * 处理流程：检查稀疏块 -> 压缩 -> 加密 -> 空间分配 -> 写入磁盘 -> 更新索引
  * Compress and write a block to file
+ * Process flow: check sparse block -> compress -> encrypt -> space allocation -> write to disk -> update index
  */
 static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *data, uint32_t dataSize) {
     CCVFS_DEBUG("=== WRITING BLOCK %u ===", blockNum);
     CCVFS_DEBUG("Block %u: writing %u bytes", blockNum, dataSize);
     
+    // 确保块索引足够大
     // Ensure block index is large enough
     if (blockNum >= pFile->header.total_blocks) {
         CCVFS_DEBUG("Need to expand block index from %u to %u", 
@@ -385,6 +422,7 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
                blockNum, (unsigned long long)pIndex->physical_offset, 
                pIndex->compressed_size, pIndex->flags);
     
+    // 检查块是否全为零（稀疏块优化）
     // Check if block is all zeros (sparse block optimization)
     int isZeroBlock = 1;
     for (uint32_t i = 0; i < dataSize; i++) {
@@ -402,9 +440,11 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
         pIndex->checksum = 0;
         pIndex->flags = CCVFS_BLOCK_SPARSE;
         
+        // 将索引标记为脏，但不立即保存
         // Mark index as dirty but don't save immediately
         pFile->index_dirty = 1;
         
+        // 即使是稀疏块也要更新逻辑数据库大小
         // Update logical database size for sparse blocks too
         if (blockNum + 1 > pFile->header.database_size_pages) {
             pFile->header.database_size_pages = blockNum + 1;
@@ -416,6 +456,7 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
         return SQLITE_OK;
     }
     
+    // 准备压缩缓冲区
     // Prepare compression buffer
     unsigned char *compressedData = NULL;
     uint32_t compressedSize = dataSize;
@@ -431,11 +472,13 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
         
         int rc = pFile->pOwner->pCompressAlg->compress(data, dataSize, compressedData, maxCompressedSize, 1);
         if (rc > 0 && (uint32_t)rc < dataSize) {
+            // 压缩成功且有效
             // Compression successful and beneficial
             compressedSize = rc;
             flags |= CCVFS_BLOCK_COMPRESSED;
             CCVFS_VERBOSE("Block %u compressed from %u to %u bytes", blockNum, dataSize, compressedSize);
         } else {
+            // 压缩失败或无效，使用原始数据
             // Compression failed or not beneficial, use original data
             sqlite3_free(compressedData);
             compressedData = NULL;
@@ -444,19 +487,22 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
         }
     }
     
+    // 如果没有压缩或压缩失败，使用原始数据
     // Use original data if no compression or compression failed
     const unsigned char *dataToWrite = compressedData ? compressedData : data;
     
+    // 如果需要则加密数据
     // Encrypt if needed
     unsigned char *encryptedData = NULL;
     if (pFile->pOwner->pEncryptAlg) {
-        encryptedData = sqlite3_malloc(compressedSize + 16); // Add padding for encryption
+        encryptedData = sqlite3_malloc(compressedSize + 16); // 为加密添加填充
         if (!encryptedData) {
             CCVFS_ERROR("Failed to allocate memory for encryption");
             if (compressedData) sqlite3_free(compressedData);
             return SQLITE_NOMEM;
         }
         
+        // 暂时使用简单密钥（实际实现中应该来自用户）
         // Use a simple key for now (in real implementation, this should come from user)
         unsigned char key[16] = "default_key_123";
         int rc = pFile->pOwner->pEncryptAlg->encrypt(key, 16, dataToWrite, compressedSize,
@@ -474,55 +520,56 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
         }
     }
     
-    // Calculate checksum
+    // 计算数据校验和
     uint32_t checksum = ccvfs_crc32(dataToWrite, compressedSize);
     
-    // Determine write offset: reuse existing block location or allocate new space
+    // 确定写入偏移：重用现有块位置或分配新空间
     sqlite3_int64 writeOffset;
     
-    // Check if block already exists and can be reused safely
+    // 检查块是否已存在且可以安全重用
     if (pIndex->physical_offset != 0) {
         uint32_t existingSpace = pIndex->compressed_size;
         
-        // ENHANCED SPACE REUSE STRATEGY: Multiple reuse scenarios
+        // 【增强空间重用策略】：多种重用场景
         if (compressedSize <= existingSpace) {
-            // SCENARIO 1: Perfect fit or smaller - direct reuse
+            // 【场景1】：完美匹配或更小 - 直接重用
             writeOffset = pIndex->physical_offset;
             
-            // Calculate space efficiency
+            // 计算空间效率
             uint32_t wastedSpace = existingSpace - compressedSize;
             double spaceEfficiency = (double)compressedSize / (double)existingSpace;
             
-            // Update space tracking counters
+            // 更新空间跟踪计数器
             pFile->space_reuse_count++;
             
-            CCVFS_DEBUG("Reusing existing space at offset %llu: new=%u, existing=%u, wasted=%u (%.1f%% efficiency)", 
+            CCVFS_DEBUG("重用现有空间在偏移 %llu: 新=%u, 现有=%u, 浪费=%u (%.1f%% 效率)", 
                        (unsigned long long)writeOffset, compressedSize, existingSpace, 
                        wastedSpace, spaceEfficiency * 100.0);
         } else {
-            // SCENARIO 2: Any size growth - check if safe expansion is possible
-            // Allow unlimited expansion if space is available behind the block
+            // 【场景2】：任意大小增长 - 检查是否可以安全扩展
+            // 如果块后面有可用空间，允许无限制扩展
             sqlite3_int64 fileSize;
             int sizeRc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
             if (sizeRc == SQLITE_OK) {
                 uint64_t blockEndOffset = pIndex->physical_offset + existingSpace;
                 uint32_t expansionNeeded = compressedSize - existingSpace;
                 
-                // Limit extreme expansions to prevent pathological behavior
+                // 限制极端扩展以防止病态行为
                 double growthRatio = (double)compressedSize / (double)existingSpace;
                 if (growthRatio > 10.0) {
-                    CCVFS_DEBUG("Extreme growth (%.1fx) detected, allocating new space for stability", growthRatio);
+                    CCVFS_DEBUG("检测到极端增长 (%.1fx)，为稳定性分配新空间", growthRatio);
                     pFile->new_allocation_count++;
                     goto allocate_new_space;
                 }
                 
-                // Check if we can safely expand (no data immediately follows this block)
+                // 检查是否可以安全扩展（没有数据紧跟在这个块后面）
                 int canExpand = 1;
                 for (uint32_t i = 0; i < pFile->header.total_blocks; i++) {
                     if (i != blockNum && pFile->pBlockIndex[i].physical_offset != 0) {
                         uint64_t otherBlockStart = pFile->pBlockIndex[i].physical_offset;
+                        // 如果其他块在扩展范围内，则不能扩展（包含32字节安全边距）
                         if (otherBlockStart >= blockEndOffset && 
-                            otherBlockStart < blockEndOffset + expansionNeeded + 32) { // 32 byte safety margin
+                            otherBlockStart < blockEndOffset + expansionNeeded + 32) { // 32字节安全边距
                             canExpand = 0;
                             break;
                         }
@@ -530,64 +577,64 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
                 }
                 
                 if (canExpand && blockEndOffset + expansionNeeded <= fileSize) {
-                    // Safe to expand existing space
+                    // 可以安全扩展现有空间
                     writeOffset = pIndex->physical_offset;
                     pFile->space_expansion_count++;
-                    CCVFS_DEBUG("Expanding existing block at offset %llu: %u->%u bytes (+%u expansion, %.1fx growth)", 
+                    CCVFS_DEBUG("扩展现有块在偏移 %llu: %u->%u 字节 (+%u 扩展, %.1fx 增长)", 
                                (unsigned long long)writeOffset, existingSpace, compressedSize, expansionNeeded, growthRatio);
                 } else {
-                    // Cannot expand safely - allocate new space
-                    CCVFS_DEBUG("Cannot expand safely (adjacent blocks or EOF), allocating new space");
+                    // 不能安全扩展 - 分配新空间
+                    CCVFS_DEBUG("不能安全扩展（相邻块或EOF），分配新空间");
                     pFile->new_allocation_count++;
                     goto allocate_new_space;
                 }
             } else {
-                CCVFS_DEBUG("Failed to get file size for expansion check, allocating new space");
+                CCVFS_DEBUG("获取文件大小失败，用于扩展检查，分配新空间");
                 pFile->new_allocation_count++;
                 goto allocate_new_space;
             }
         }
     } else {
         allocate_new_space:
-        // Smart space allocation: try best-fit first, then append to end
+        // 【智能空间分配】：先尝试最佳适配，然后追加到文件末尾
         pFile->new_allocation_count++;
         
-        // Try to find a suitable hole using best-fit algorithm
+        // 尝试使用最佳适配算法找到合适的空洞
         uint32_t wastedSpace = 0;
         writeOffset = ccvfs_find_best_fit_space(pFile, compressedSize, &wastedSpace);
         
         if (writeOffset > 0) {
-            // Found a suitable hole - use it
+            // 找到合适的空洞 - 使用它
             pFile->hole_reclaim_count++;
             pFile->best_fit_count++;
-            CCVFS_DEBUG("Using best-fit hole at offset %llu for %u bytes (waste: %u)", 
+            CCVFS_DEBUG("使用最佳适配空洞在偏移 %llu 存储 %u 字节 (浪费: %u)", 
                        (unsigned long long)writeOffset, compressedSize, wastedSpace);
         } else {
-            // No suitable hole found - append to end of file
+            // 没有找到合适的空洞 - 追加到文件末尾
             sqlite3_int64 fileSize;
             int sizeRc = pFile->pReal->pMethods->xFileSize(pFile->pReal, &fileSize);
             if (sizeRc != SQLITE_OK) {
-                CCVFS_ERROR("Failed to get file size: %d", sizeRc);
+                CCVFS_ERROR("获取文件大小失败: %d", sizeRc);
                 if (encryptedData) sqlite3_free(encryptedData);
                 if (compressedData) sqlite3_free(compressedData);
                 return sizeRc;
             }
             
-            // Check for sequential write pattern (multiple consecutive block allocations)
+            // 检查顺序写入模式（多个连续块分配）
             if (pFile->last_written_block != UINT32_MAX && blockNum == pFile->last_written_block + 1) {
                 pFile->sequential_write_count++;
-                CCVFS_DEBUG("Sequential write detected: blocks %u->%u", pFile->last_written_block, blockNum);
+                CCVFS_DEBUG("检测到顺序写入: 块 %u->%u", pFile->last_written_block, blockNum);
             }
             pFile->last_written_block = blockNum;
             
-            // Ensure we write data blocks after the reserved index table space
+            // 确保我们在保留的索引表空间之后写入数据块
             writeOffset = fileSize;
             if (writeOffset < CCVFS_DATA_BLOCKS_OFFSET) {
                 writeOffset = CCVFS_DATA_BLOCKS_OFFSET;
-                CCVFS_DEBUG("Adjusting write offset to %llu (after reserved index space)", 
+                CCVFS_DEBUG("调整写入偏移到 %llu (保留索引空间之后)", 
                            (unsigned long long)writeOffset);
             } else {
-                CCVFS_DEBUG("Allocating new block at end of file: offset %llu (sequential: %u)", 
+                CCVFS_DEBUG("在文件末尾分配新块: 偏移 %llu (顺序: %u)", 
                            (unsigned long long)writeOffset, pFile->sequential_write_count);
             }
         }
@@ -639,7 +686,7 @@ static int writeBlock(CCVFSFile *pFile, uint32_t blockNum, const unsigned char *
 }
 
 /*
- * Update space utilization tracking metrics
+ * 更新空间利用跟踪指标
  */
 static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
     uint64_t totalAllocated = 0;
@@ -648,15 +695,15 @@ static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
     uint32_t wastedSpaceBlocks = 0;
     uint64_t totalWastedSpace = 0;
     
-    // Calculate space utilization from all blocks
+    // 从所有块计算空间利用率
     for (uint32_t i = 0; i < pFile->header.total_blocks; i++) {
         CCVFSBlockIndex *pIndex = &pFile->pBlockIndex[i];
-        if (pIndex->physical_offset != 0) { // Non-sparse block
+        if (pIndex->physical_offset != 0) { // 非稀疏块
             blockCount++;
             totalAllocated += pIndex->compressed_size;
-            totalUsed += pIndex->compressed_size; // All allocated space is currently used
+            totalUsed += pIndex->compressed_size; // 所有分配的空间目前都被使用
             
-            // Check for significant wasted space (>10% waste)
+            // 检查显著的浪费空间（>10%浪费）
             if (pIndex->original_size > 0) {
                 uint32_t wastedSpace = (pIndex->compressed_size > pIndex->original_size) ? 
                                      0 : (pIndex->original_size - pIndex->compressed_size);
@@ -668,14 +715,14 @@ static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
         }
     }
     
-    // Update tracking fields
+    // 更新跟踪字段
     pFile->total_allocated_space = totalAllocated;
     pFile->total_used_space = totalUsed;
     
-    // Calculate advanced fragmentation score (0-100)
-    // Factors: wasted space ratio, reuse efficiency, hole reclaim efficiency, sequential write efficiency
+    // 计算高级碎片化评分（0-100）
+    // 因素：浪费空间比率、重用效率、空洞回收效率、顺序写入效率
     if (totalAllocated > 0) {
-        uint32_t wastedSpaceScore = (uint32_t)((totalWastedSpace * 30) / totalAllocated); // 0-30 points
+        uint32_t wastedSpaceScore = (uint32_t)((totalWastedSpace * 30) / totalAllocated); // 0-30分
         
         uint32_t reuseEfficiencyScore = 0;
         uint32_t holeReclaimScore = 0;
@@ -683,15 +730,15 @@ static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
         
         uint32_t totalOperations = pFile->space_reuse_count + pFile->space_expansion_count + pFile->new_allocation_count;
         if (totalOperations > 0) {
-            // Reuse efficiency (0-30 points)
+            // 重用效率（0-30分）
             uint32_t reuseRatio = (pFile->space_reuse_count * 100) / totalOperations;
             reuseEfficiencyScore = (100 - reuseRatio) * 30 / 100;
             
-            // Hole reclaim efficiency (0-25 points) - good hole reclaiming reduces fragmentation
+            // 空洞回收效率（0-25分）- 良好的空洞回收减少碎片化
             uint32_t holeReclaimRatio = (pFile->hole_reclaim_count * 100) / totalOperations;
             holeReclaimScore = (100 - holeReclaimRatio) * 25 / 100;
             
-            // Sequential write efficiency (0-15 points) - sequential writes reduce fragmentation
+            // 顺序写入效率（0-15分）- 顺序写入减少碎片化
             if (blockCount > 1) {
                 uint32_t sequentialRatio = (pFile->sequential_write_count * 100) / (blockCount - 1);
                 sequentialWriteScore = (100 - sequentialRatio) * 15 / 100;
@@ -712,6 +759,14 @@ static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
                pFile->hole_reclaim_count, pFile->best_fit_count, pFile->sequential_write_count);
 }
 
+/*
+ * 将数据写入文件
+ * 对于CCVFS文件：初始化文件头、使用基于块的写入、处理跨块写入
+ * 对于普通文件：直接传递给底层VFS
+ * Write data to file
+ * For CCVFS files: initialize header, use block-based writing, handle cross-block writes
+ * For regular files: pass directly to underlying VFS
+ */
 int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     const unsigned char *data = (const unsigned char*)zBuf;
@@ -720,6 +775,7 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
     
     CCVFS_DEBUG("=== WRITING %d bytes at offset %lld to file: %s ===", iAmt, iOfst, p->filename ? p->filename : "unknown");
     
+    // 对新CCVFS文件的首次写入初始化CCVFS文件头
     // Initialize CCVFS header for new CCVFS files on first write
     if (p->is_ccvfs_file && !p->header_loaded && iOfst == 0) {
         CCVFS_DEBUG("First write to new CCVFS file, initializing header");
@@ -729,6 +785,7 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
             return rc;
         }
         
+        // 先保存文件头
         // Save header first
         rc = ccvfs_save_header(p);
         if (rc != SQLITE_OK) {
@@ -738,12 +795,14 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
         CCVFS_DEBUG("CCVFS header initialized and saved");
     }
     
+    // 如果不是CCVFS文件，直接写入底层文件
     // If not a CCVFS file, write directly to underlying file
     if (!p->is_ccvfs_file) {
         CCVFS_DEBUG("Writing to regular file");
         return p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
     }
     
+    // CCVFS文件 - 使用基于块的写入
     // CCVFS file - use block-based writing
     uint32_t blockSize = p->header.block_size;
     if (blockSize == 0) {
@@ -779,22 +838,26 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
         CCVFS_DEBUG("Writing iteration: currentBlock=%u, currentOffset=%u, bytesToWrite=%u", 
                    currentBlock, currentOffset, bytesToWrite);
         
+        // 如果我们不是写入一个完整的块，先读取现有数据
         // If we're not writing a full block, read existing data first
         if (currentOffset != 0 || bytesToWrite != blockSize) {
             CCVFS_DEBUG("Partial block write, reading existing data");
             rc = readBlock(p, currentBlock, blockBuffer, blockSize);
             if (rc != SQLITE_OK) {
+                // 如果块不存在，用零填充
                 // If block doesn't exist, fill with zeros
                 CCVFS_DEBUG("Block doesn't exist, filling with zeros");
                 memset(blockBuffer, 0, blockSize);
             }
         }
         
+        // 将新数据复制到块缓冲区
         // Copy new data into block buffer
         memcpy(blockBuffer + currentOffset, data + bytesWritten, bytesToWrite);
         
         CCVFS_DEBUG("Modified block buffer, writing block %u", currentBlock);
         
+        // 写入修改后的块
         // Write modified block
         rc = writeBlock(p, currentBlock, blockBuffer, blockSize);
         if (rc != SQLITE_OK) {
@@ -817,26 +880,36 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
 }
 
 /*
+ * 将文件截断到指定大小
+ * 对于CCVFS文件：更新元数据和块计数
+ * 对于普通文件：直接截断底层文件
  * Truncate file to specified size
+ * For CCVFS files: update metadata and block count
+ * For regular files: truncate underlying file directly
  */
 int ccvfsIoTruncate(sqlite3_file *pFile, sqlite3_int64 size) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
     CCVFS_DEBUG("Truncating file to %lld bytes", size);
     
+    // 如果不是CCVFS文件，直接截断底层文件
     // If not a CCVFS file, truncate underlying file directly
     if (!p->is_ccvfs_file) {
         CCVFS_DEBUG("Truncating regular file");
         return p->pReal->pMethods->xTruncate(p->pReal, size);
     }
     
+    // CCVFS文件 - 更新元数据
     // CCVFS file - update metadata
     uint32_t blockSize = p->header.block_size;
     uint32_t newBlockCount = (uint32_t)((size + blockSize - 1) / blockSize);
     
+    // 更新文件头
     // Update header
     p->header.database_size_pages = (uint32_t)(size / blockSize);
     
+    // 如果减小大小，我们可以在这里释放未使用的块
+    // 现在只更新块计数
     // If reducing size, we could free unused blocks here
     // For now, just update the block count
     if (newBlockCount < p->header.total_blocks) {
@@ -848,13 +921,17 @@ int ccvfsIoTruncate(sqlite3_file *pFile, sqlite3_int64 size) {
 }
 
 /*
+ * 将文件同步到磁盘
+ * 先保存CCVFS的块索引和文件头，然后同步底层文件
  * Sync file to disk
+ * Save CCVFS block index and header first, then sync underlying file
  */
 int ccvfsIoSync(sqlite3_file *pFile, int flags) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
     CCVFS_DEBUG("Syncing file with flags %d", flags);
     
+    // 如果是CCVFS文件，先保存块索引和文件头
     // Save block index and header first if this is a CCVFS file
     if (p->pBlockIndex && p->header_loaded) {
         int rc = ccvfs_save_block_index(p);
@@ -870,6 +947,7 @@ int ccvfsIoSync(sqlite3_file *pFile, int flags) {
         }
     }
     
+    // 同步底层文件
     // Sync underlying file
     if (p->pReal && p->pReal->pMethods->xSync) {
         int rc = p->pReal->pMethods->xSync(p->pReal, flags);
@@ -884,21 +962,29 @@ int ccvfsIoSync(sqlite3_file *pFile, int flags) {
 }
 
 /*
+ * 获取文件大小
+ * 对于CCVFS文件：返回基于块结构的逻辑文件大小
+ * 对于普通文件：返回底层文件大小
  * Get file size
+ * For CCVFS files: return logical file size based on block structure
+ * For regular files: return underlying file size
  */
 int ccvfsIoFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
     CCVFS_DEBUG("Getting file size");
     
+    // 如果不是CCVFS文件，从底层文件获取大小
     // If not a CCVFS file, get size from underlying file
     if (!p->is_ccvfs_file) {
         CCVFS_DEBUG("Getting size from regular file");
         return p->pReal->pMethods->xFileSize(p->pReal, pSize);
     }
     
+    // 对于CCVFS文件，确保文件头已加载
     // For CCVFS files, ensure header is loaded
     if (!p->header_loaded) {
+        // 对于尚未初始化的新文件，初始化文件头
         // For new files that haven't been initialized yet, initialize the header
         int rc = ccvfs_init_header(p, p->pOwner);
         if (rc != SQLITE_OK) {
@@ -907,6 +993,7 @@ int ccvfsIoFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize) {
         }
     }
     
+    // 基于块结构返回逻辑文件大小
     // Return logical file size based on block structure
     uint32_t blockSize = p->header.block_size;
     if (blockSize == 0) {
@@ -922,7 +1009,10 @@ int ccvfsIoFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize) {
 }
 
 /*
+ * 锁定文件
+ * 直接传递给底层VFS处理
  * Lock file
+ * Pass through to underlying VFS
  */
 int ccvfsIoLock(sqlite3_file *pFile, int eLock) {
     CCVFSFile *p = (CCVFSFile *)pFile;
@@ -937,7 +1027,10 @@ int ccvfsIoLock(sqlite3_file *pFile, int eLock) {
 }
 
 /*
+ * 解锁文件
+ * 直接传递给底层VFS处理
  * Unlock file
+ * Pass through to underlying VFS
  */
 int ccvfsIoUnlock(sqlite3_file *pFile, int eLock) {
     CCVFSFile *p = (CCVFSFile *)pFile;
@@ -952,7 +1045,10 @@ int ccvfsIoUnlock(sqlite3_file *pFile, int eLock) {
 }
 
 /*
+ * 检查保留锁
+ * 直接传递给底层VFS处理
  * Check reserved lock
+ * Pass through to underlying VFS
  */
 int ccvfsIoCheckReservedLock(sqlite3_file *pFile, int *pResOut) {
     CCVFSFile *p = (CCVFSFile *)pFile;
@@ -968,13 +1064,17 @@ int ccvfsIoCheckReservedLock(sqlite3_file *pFile, int *pResOut) {
 }
 
 /*
+ * 文件控制操作
+ * 处理CCVFS特定操作，其他传递给底层VFS
  * File control operations
+ * Handle CCVFS specific operations, others pass through to underlying VFS
  */
 int ccvfsIoFileControl(sqlite3_file *pFile, int op, void *pArg) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
     CCVFS_DEBUG("File control operation %d", op);
     
+    // 在这里处理CCVFS特定操作（如果需要）
     // Handle CCVFS specific operations here if needed
     
     if (p->pReal && p->pReal->pMethods->xFileControl) {
@@ -985,7 +1085,10 @@ int ccvfsIoFileControl(sqlite3_file *pFile, int op, void *pArg) {
 }
 
 /*
+ * 获取扇区大小
+ * 从底层VFS获取或返回默认值
  * Get sector size
+ * Get from underlying VFS or return default
  */
 int ccvfsIoSectorSize(sqlite3_file *pFile) {
     CCVFSFile *p = (CCVFSFile *)pFile;
@@ -994,11 +1097,14 @@ int ccvfsIoSectorSize(sqlite3_file *pFile) {
         return p->pReal->pMethods->xSectorSize(p->pReal);
     }
     
-    return 4096; // Default sector size
+    return 4096; // 默认扇区大小
 }
 
 /*
+ * 获取设备特性
+ * 从底层VFS获取或返回默认值
  * Get device characteristics
+ * Get from underlying VFS or return default
  */
 int ccvfsIoDeviceCharacteristics(sqlite3_file *pFile) {
     CCVFSFile *p = (CCVFSFile *)pFile;
@@ -1011,6 +1117,7 @@ int ccvfsIoDeviceCharacteristics(sqlite3_file *pFile) {
 }
 
 /*
+ * 共享内存映射 - 传递给底层VFS
  * Shared memory map - pass through to underlying VFS
  */
 int ccvfsIoShmMap(sqlite3_file *pFile, int iPg, int pgsz, int bExtend, void volatile **pp) {
@@ -1024,6 +1131,7 @@ int ccvfsIoShmMap(sqlite3_file *pFile, int iPg, int pgsz, int bExtend, void vola
 }
 
 /*
+ * 共享内存锁 - 传递给底层VFS
  * Shared memory lock - pass through to underlying VFS
  */
 int ccvfsIoShmLock(sqlite3_file *pFile, int offset, int n, int flags) {
@@ -1037,6 +1145,7 @@ int ccvfsIoShmLock(sqlite3_file *pFile, int offset, int n, int flags) {
 }
 
 /*
+ * 共享内存屏障 - 传递给底层VFS
  * Shared memory barrier - pass through to underlying VFS
  */
 void ccvfsIoShmBarrier(sqlite3_file *pFile) {
@@ -1048,6 +1157,7 @@ void ccvfsIoShmBarrier(sqlite3_file *pFile) {
 }
 
 /*
+ * 共享内存取消映射 - 传递给底层VFS
  * Shared memory unmap - pass through to underlying VFS
  */
 int ccvfsIoShmUnmap(sqlite3_file *pFile, int deleteFlag) {
@@ -1061,6 +1171,7 @@ int ccvfsIoShmUnmap(sqlite3_file *pFile, int deleteFlag) {
 }
 
 /*
+ * 获取页面 - 压缩VFS不支持此操作
  * Fetch page - not supported for compressed VFS
  */
 int ccvfsIoFetch(sqlite3_file *pFile, sqlite3_int64 iOfst, int iAmt, void **pp) {
@@ -1069,6 +1180,7 @@ int ccvfsIoFetch(sqlite3_file *pFile, sqlite3_int64 iOfst, int iAmt, void **pp) 
 }
 
 /*
+ * 释放页面 - 压缩VFS不支持此操作
  * Unfetch page - not supported for compressed VFS
  */
 int ccvfsIoUnfetch(sqlite3_file *pFile, sqlite3_int64 iOfst, void *pPage) {
