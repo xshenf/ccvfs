@@ -63,7 +63,7 @@ int test_vfs_connection() {
     
     printf("✅ Database opened successfully\n");
     
-    // Set page size to 64KB to match CCVFS block size for optimal performance
+    // Set page size to 64KB to match CCVFS page size for optimal performance
     char *err_msg = NULL;
     /*rc = sqlite3_exec(db, "PRAGMA page_size=65536;", 0, 0, &err_msg);
     if (rc != SQLITE_OK) {

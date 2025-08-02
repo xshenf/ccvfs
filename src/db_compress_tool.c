@@ -276,7 +276,7 @@ int sqlite3_ccvfs_decompress_database(
         printf("加密算法: %s\n", stats.encrypt_algorithm);
         printf("原始大小: %llu 字节\n", (unsigned long long)stats.original_size);
         printf("压缩比: %u%%\n", stats.compression_ratio);
-        printf("总块数: %u\n", stats.total_blocks);
+        printf("总页数: %u\n", stats.total_pages);
     } else {
         printf("警告: 无法读取压缩文件统计信息\n");
         // Set default algorithms if stats reading fails
@@ -424,7 +424,7 @@ int sqlite3_ccvfs_get_stats(const char *compressed_db, CCVFSStats *stats) {
     stats->original_size = header.original_file_size;
     stats->compressed_size = header.compressed_file_size;
     stats->compression_ratio = header.compression_ratio;
-    stats->total_blocks = header.total_blocks;
+    stats->total_pages = header.total_pages;
     
     strncpy(stats->compress_algorithm, header.compress_algorithm, 
             CCVFS_MAX_ALGORITHM_NAME - 1);
@@ -507,14 +507,14 @@ void sqlite3_activate_cerod(const char *zParms) {
 }
 
 /*
- * Compress an existing SQLite database with custom block size
+ * Compress an existing SQLite database with custom page size
  */
-int sqlite3_ccvfs_compress_database_with_block_size(
+int sqlite3_ccvfs_compress_database_with_page_size(
     const char *source_db,
     const char *compressed_db,
     const char *compress_algorithm,
     const char *encrypt_algorithm,
-    uint32_t block_size,
+    uint32_t page_size,
     int compression_level
 ) {
     sqlite3 *source = NULL;
@@ -526,25 +526,25 @@ int sqlite3_ccvfs_compress_database_with_block_size(
     CCVFSFileHeader header;
     time_t start_time, end_time;
     
-    printf("开始压缩数据库 (块大小: %u KB)...\n", block_size / 1024);
+    printf("开始压缩数据库 (页大小: %u KB)...\n", page_size / 1024);
     printf("源文件: %s\n", source_db);
     printf("目标文件: %s\n", compressed_db);
     printf("压缩算法: %s\n", compress_algorithm ? compress_algorithm : "none");
     printf("加密算法: %s\n", encrypt_algorithm ? encrypt_algorithm : "none");
-    printf("块大小: %u 字节 (%u KB)\n", block_size, block_size / 1024);
+    printf("页大小: %u 字节 (%u KB)\n", page_size, page_size / 1024);
     printf("压缩等级: %d\n", compression_level);
     
     start_time = time(NULL);
     
-    // Validate block size
-    if (block_size < CCVFS_MIN_BLOCK_SIZE || block_size > CCVFS_MAX_BLOCK_SIZE) {
-        printf("错误: 无效的块大小 %u (必须在 %u - %u 之间)\n", 
-               block_size, CCVFS_MIN_BLOCK_SIZE, CCVFS_MAX_BLOCK_SIZE);
+    // Validate page size
+    if (page_size < CCVFS_MIN_PAGE_SIZE || page_size > CCVFS_MAX_PAGE_SIZE) {
+        printf("错误: 无效的页大小 %u (必须在 %u - %u 之间)\n",
+               page_size, CCVFS_MIN_PAGE_SIZE, CCVFS_MAX_PAGE_SIZE);
         return SQLITE_ERROR;
     }
     
-    if ((block_size & (block_size - 1)) != 0) {
-        printf("错误: 块大小必须是2的幂: %u\n", block_size);
+    if ((page_size & (page_size - 1)) != 0) {
+        printf("错误: 页大小必须是2的幂: %u\n", page_size);
         return SQLITE_ERROR;
     }
     
@@ -562,10 +562,10 @@ int sqlite3_ccvfs_compress_database_with_block_size(
     
     printf("源文件大小: %ld 字节\n", source_size);
     
-    // Create CCVFS for compression with custom block size
+    // Create CCVFS for compression with custom page size
     rc = sqlite3_ccvfs_create("compress_vfs_custom", NULL, 
                               compress_algorithm, encrypt_algorithm, 
-                              block_size, CCVFS_CREATE_OFFLINE);
+                              page_size, CCVFS_CREATE_OFFLINE);
     if (rc != SQLITE_OK) {
         printf("错误: 创建压缩VFS失败: %d\n", rc);
         return rc;
@@ -694,7 +694,7 @@ int sqlite3_ccvfs_compress_database_with_block_size(
         printf("压缩后大小: %ld 字节\n", target_size);
         printf("压缩比: %.2f%%\n", compression_ratio);
         printf("节省空间: %ld 字节\n", space_saved);
-        printf("块大小: %u KB\n", block_size / 1024);
+        printf("页大小: %u KB\n", page_size / 1024);
         printf("用时: %ld 秒\n", end_time - start_time);
     } else {
         printf("警告: 无法获取压缩文件大小\n");

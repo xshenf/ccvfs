@@ -109,8 +109,8 @@ sqlite3_open_v2("test.db", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "ccv
 ```
 
 ### Block-based Processing
-- Default block size: 8KB (configurable via `CCVFS_DEFAULT_BLOCK_SIZE`)
-- Each block processed independently for compression and encryption
+- Default page size: 8KB (configurable via `CCVFS_DEFAULT_PAGE_SIZE`)
+- Each page processed independently for compression and encryption
 - Block headers contain metadata for validation and reconstruction
 
 ## Debugging Features
@@ -120,7 +120,7 @@ The codebase includes comprehensive debug logging controlled by compile-time mac
 - `VERBOSE`: Detailed verbose logging
 - Four log levels: ERROR, INFO, DEBUG, VERBOSE
 
-Debug output provides detailed information about VFS operations, algorithm selection, block processing, and error conditions.
+Debug output provides detailed information about VFS operations, algorithm selection, page processing, and error conditions.
 
 ## Important Technical Constraints
 

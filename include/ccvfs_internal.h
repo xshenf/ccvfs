@@ -43,7 +43,7 @@ typedef struct CCVFS {
     CompressAlgorithm *pCompressAlg; /* Compression algorithm implementation */
     EncryptAlgorithm *pEncryptAlg;   /* Encryption algorithm implementation */
     uint32_t creation_flags;    /* Creation flags */
-    uint32_t block_size;        /* Block size in bytes */
+    uint32_t page_size;        /* Page size in bytes (页面大小，对应SQLite页面大小) */
     
     // 数据完整性和错误处理配置
     // Data integrity and error handling configuration
@@ -53,39 +53,39 @@ typedef struct CCVFS {
 } CCVFS;
 
 /*
- * CCVFS file structure
+ * CCVFS file structure - CCVFS文件结构
  */
 typedef struct CCVFSFile {
     sqlite3_file base;          /* Base file structure */
     sqlite3_file *pReal;        /* Actual file pointer */
     CCVFS *pOwner;              /* Owner VFS */
     CCVFSFileHeader header;     /* Cached file header */
-    CCVFSBlockIndex *pBlockIndex; /* Block index table (in-memory) */
+    CCVFSPageIndex *pPageIndex; /* Page index table (in-memory) 页面索引表（内存中） */
     int index_dirty;              /* 1 if index needs to be saved */
-    uint32_t index_capacity;      /* Allocated capacity for block index */
+    uint32_t index_capacity;      /* Allocated capacity for page index */
     int header_loaded;          /* Header loaded flag */
     int open_flags;             /* File open flags */
     int is_ccvfs_file;          /* Is this a CCVFS format file */
     char *filename;             /* File path for debugging */
     
-    // Space utilization tracking
-    uint64_t total_allocated_space;   /* Total space allocated for data blocks */
+    // Space utilization tracking - 空间利用跟踪
+    uint64_t total_allocated_space;   /* Total space allocated for data pages */
     uint64_t total_used_space;        /* Total space actually used by compressed data */
     uint32_t fragmentation_score;     /* Fragmentation score (0-100, higher = more fragmented) */
     uint32_t space_reuse_count;       /* Number of successful space reuses */
     uint32_t space_expansion_count;   /* Number of space expansions */
     uint32_t new_allocation_count;    /* Number of new space allocations */
     
-    // Advanced space management
+    // Advanced space management - 高级空间管理
     uint32_t hole_reclaim_count;      /* Number of space holes reclaimed */
     uint32_t best_fit_count;          /* Number of best-fit allocations */
     uint32_t sequential_write_count;  /* Number of sequential writes detected */
-    uint32_t last_written_block;      /* Last block number written (for sequential detection) */
+    uint32_t last_written_page;      /* Last page number written (for sequential detection) */
     
     // 数据完整性统计和错误跟踪
     // Data integrity statistics and error tracking
     uint32_t checksum_error_count;    /* 校验和错误次数 Number of checksum errors encountered */
-    uint32_t corrupted_block_count;   /* 损坏块数量 Number of corrupted blocks detected */
+    uint32_t corrupted_page_count;   /* 损坏页数量 Number of corrupted pages detected */
     uint32_t recovery_attempt_count;  /* 数据恢复尝试次数 Number of data recovery attempts */
     uint32_t successful_recovery_count; /* 成功恢复次数 Number of successful recoveries */
 } CCVFSFile;

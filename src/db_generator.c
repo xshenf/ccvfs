@@ -29,7 +29,7 @@ typedef struct {
     int use_compression;        // Use CCVFS compression
     char *compress_algorithm;   // Compression algorithm
     char *encrypt_algorithm;    // Encryption algorithm
-    uint32_t block_size;        // Block size for compression
+    uint32_t page_size;        // Page size for compression
     int compression_level;      // Compression level (1-9)
     DataMode data_mode;         // Data generation mode
     int record_size;            // Average record size
@@ -762,8 +762,8 @@ static long parse_size_string(const char *size_str) {
     return (long)value;
 }
 
-// Parse block size string
-static uint32_t parse_block_size(const char *size_str) {
+// Parse page size string
+static uint32_t parse_page_size(const char *size_str) {
     if (!size_str) return 0;
     
     char *endptr;
@@ -783,7 +783,7 @@ static uint32_t parse_block_size(const char *size_str) {
     }
     
     // Validate range
-    if (value < CCVFS_MIN_BLOCK_SIZE || value > CCVFS_MAX_BLOCK_SIZE) {
+    if (value < CCVFS_MIN_PAGE_SIZE || value > CCVFS_MAX_PAGE_SIZE) {
         return 0;
     }
     
@@ -808,7 +808,7 @@ static void print_usage(const char *program_name) {
     printf("  -c, --compress              启用压缩 (使用CCVFS)\n");
     printf("  -a, --compress-algo <算法>  压缩算法 (rle, lz4, zlib, 默认: zlib)\n");
     printf("  -e, --encrypt-algo <算法>   加密算法 (xor, aes128, aes256, chacha20)\n");
-    printf("  -b, --block-size <大小>     压缩块大小 (1K-1M, 默认: 64K)\n");
+    printf("  -b, --page-size <大小>     压缩页大小 (1K-1M, 默认: 64K)\n");
     printf("  -l, --level <等级>          压缩等级 (1-9, 默认: 6)\n");
     printf("  -m, --mode <模式>           数据生成模式:\n");
     printf("                                random    - 随机文本数据 (默认)\n");
@@ -826,7 +826,7 @@ static void print_usage(const char *program_name) {
     printf("示例:\n");
     printf("  %s test.db 10MB                          # 创建10MB非压缩数据库\n", program_name);
     printf("  %s -c test.ccvfs 50MB                    # 创建50MB压缩数据库\n", program_name);
-    printf("  %s -c -a zlib -b 4K test.ccvfs 100MB    # 使用zlib和4KB块压缩\n", program_name);
+    printf("  %s -c -a zlib -b 4K test.ccvfs 100MB    # 使用zlib和4KB页压缩\n", program_name);
     printf("  %s -m lorem -r 2048 -t 5 test.db 25MB   # Lorem文本,2KB记录,5个表\n", program_name);
     printf("  %s -c -e aes128 secure.ccvfs 1GB        # 压缩+AES128加密的1GB数据库\n", program_name);
 }
@@ -838,7 +838,7 @@ int main(int argc, char *argv[]) {
         .use_compression = 0,
         .compress_algorithm = "zlib",
         .encrypt_algorithm = NULL,
-        .block_size = 0,  // Use default
+        .page_size = 0,  // Use default
         .compression_level = 6,
         .data_mode = DATA_MODE_RANDOM,
         .record_size = 1024,
@@ -852,7 +852,7 @@ int main(int argc, char *argv[]) {
         {"compress",        no_argument,       0, 'c'},
         {"compress-algo",   required_argument, 0, 'a'},
         {"encrypt-algo",    required_argument, 0, 'e'},
-        {"block-size",      required_argument, 0, 'b'},
+        {"page-size",      required_argument, 0, 'b'},
         {"level",           required_argument, 0, 'l'},
         {"mode",            required_argument, 0, 'm'},
         {"record-size",     required_argument, 0, 'r'},
@@ -880,9 +880,9 @@ int main(int argc, char *argv[]) {
                 }
                 break;
             case 'b':
-                config.block_size = parse_block_size(optarg);
-                if (config.block_size == 0) {
-                    fprintf(stderr, "错误: 无效的块大小 '%s'\n", optarg);
+                config.page_size = parse_page_size(optarg);
+                if (config.page_size == 0) {
+                    fprintf(stderr, "错误: 无效的页大小 '%s'\n", optarg);
                     return 1;
                 }
                 break;
@@ -973,7 +973,7 @@ int main(int argc, char *argv[]) {
     if (config.use_compression) {
         printf("压缩算法: %s\n", config.compress_algorithm);
         printf("加密算法: %s\n", config.encrypt_algorithm ? config.encrypt_algorithm : "无");
-        printf("块大小: %s\n", config.block_size > 0 ? "自定义" : "64KB (默认)");
+        printf("页大小: %s\n", config.page_size > 0 ? "自定义" : "64KB (默认)");
         printf("压缩等级: %d\n", config.compression_level);
     }
     printf("\n");
@@ -989,7 +989,7 @@ int main(int argc, char *argv[]) {
         rc = sqlite3_ccvfs_create("generator_vfs", NULL, 
                                   config.compress_algorithm, 
                                   config.encrypt_algorithm,
-                                  config.block_size, 
+                                  config.page_size,
                                   CCVFS_CREATE_OFFLINE);
         if (rc != SQLITE_OK) {
             fprintf(stderr, "错误: 创建压缩VFS失败: %d\n", rc);

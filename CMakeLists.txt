@@ -59,7 +59,7 @@ set(CCVFS_SRC
     src/ccvfs_core.c
     src/ccvfs_io.c  
     src/ccvfs_algorithm.c
-    src/ccvfs_block.c
+        src/ccvfs_page.c
     src/ccvfs_utils.c
     src/db_compress_tool.c
 )

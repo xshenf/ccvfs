@@ -20,7 +20,7 @@ CCVFS (Compressed and Encrypted Virtual File System) 是一个 SQLite 虚拟文�
 # 参数说明:
 # -c: 启用压缩
 # -a zlib: 使用 zlib 压缩算法
-# -b 64K: 设置 64KB 块大小
+# -b 64K: 设置 64KB 页大小
 # compressed.ccvfs: 输出文件名
 # 10MB: 目标文件大小
 ```
@@ -68,9 +68,9 @@ sqlite3_ccvfs_destroy("my_ccvfs");
 ./db_generator.exe -c -a zlib -b 64K balanced.ccvfs 1GB
 ```
 
-### 块大小配置
+### 页大小配置
 
-| 块大小 | 内存使用 | 压缩效率 | 随机访问 | 适用场景 |
+| 页大小 | 内存使用 | 压缩效率 | 随机访问 | 适用场景 |
 |--------|----------|----------|----------|----------|
 | **4KB** | 低 | 较低 | 优秀 | OLTP,频繁随机访问 |
 | **64KB** | 中等 | 良好 | 良好 | 通用推荐配置 |
@@ -108,21 +108,21 @@ sqlite3_ccvfs_destroy("my_ccvfs");
 
 **OLTP (在线事务处理):**
 ```bash
-# 配置: 小块 + 快速压缩 + 缓存优化
+# 配置: 小页 + 快速压缩 + 缓存优化
 ./db_generator.exe -c -a lz4 -b 16K \
   --batch-size 500 oltp_optimized.ccvfs 1GB
 ```
 
 **OLAP (在线分析处理):**
 ```bash
-# 配置: 大块 + 高压缩 + 批量处理
+# 配置: 大页 + 高压缩 + 批量处理
 ./db_generator.exe -c -a zlib -b 256K \
   --batch-size 10000 olap_optimized.ccvfs 10GB
 ```
 
 **数据归档:**
 ```bash
-# 配置: 最大块 + 最高压缩 + 加密
+# 配置: 最大页 + 最高压缩 + 加密
 ./db_generator.exe -c -a zlib -e aes256 -b 1M \
   archive_optimized.ccvfs 100GB
 ```
@@ -174,7 +174,7 @@ int setup_production_db() {
         NULL,                   // 使用默认底层 VFS
         "zlib",                 // 平衡压缩算法
         "aes256",               // 生产级加密
-        64 * 1024,              // 64KB 块大小
+        64 * 1024,              // 64KB 页大小
         CCVFS_CREATE_OFFLINE    // 离线模式标志
     );
     
@@ -184,7 +184,7 @@ int setup_production_db() {
     }
     
     // 2. 配置性能参数
-    sqlite3_ccvfs_set_cache_size("prod_ccvfs", 32); // 32个块缓存
+    sqlite3_ccvfs_set_cache_size("prod_ccvfs", 32); // 32个页缓存
     sqlite3_ccvfs_enable_prefetch("prod_ccvfs", 1); // 启用预取
     
     return SQLITE_OK;
@@ -223,16 +223,16 @@ done
 **错误: 压缩文件比原文件大**
 ```
 原因: 小文件的固定开销(1.5MB索引表)
-解决: 使用更小的块大小或者不压缩小文件
+解决: 使用更小的页大小或者不压缩小文件
 
-# 对小文件使用4KB块
+# 对小文件使用4KB页
 ./db_generator.exe -c -b 4K small.ccvfs 1MB
 ```
 
 **错误: 性能下降明显**
 ```
 检查点:
-1. 块大小是否合适当前访问模式
+1. 页大小是否合适当前访问模式
 2. 缓存配置是否足够
 3. 压缩算法是否适合数据特性
 
@@ -269,9 +269,9 @@ gcc -DENABLE_DEBUG -DENABLE_VERBOSE compress_vfs.c -o debug_version
 ### 1. 设计原则
 
 **选择合适的压缩策略:**
-- 文件大小 < 10MB: 考虑不压缩或使用4KB块
-- 文件大小 10MB-100MB: 使用64KB块 + zlib
-- 文件大小 > 100MB: 使用256KB-1MB块 + zlib
+- 文件大小 < 10MB: 考虑不压缩或使用4KB页
+- 文件大小 10MB-100MB: 使用64KB页 + zlib
+- 文件大小 > 100MB: 使用256KB-1MB页 + zlib
 
 **数据库设计优化:**
 - 使用适当的数据类型减少存储空间
@@ -314,4 +314,4 @@ CCVFS 提供了一个强大而灵活的数据库压缩解决方案，通过合�
 - **性能平衡**: 合理的读写性能权衡
 - **数据安全**: 可选的加密保护
 
-关键是根据具体应用场景选择合适的压缩算法、块大小和缓存策略，并进行充分的测试验证。
+关键是根据具体应用场景选择合适的压缩算法、页大小和缓存策略，并进行充分的测试验证。

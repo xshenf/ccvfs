@@ -1,7 +1,7 @@
 #include "ccvfs_core.h"
 #include "ccvfs_io.h"
 #include "ccvfs_algorithm.h"
-#include "ccvfs_block.h"
+#include "ccvfs_page.h"
 
 /*
  * Open file
@@ -22,7 +22,7 @@ int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile,
     pCcvfsFile->open_flags = flags;
     pCcvfsFile->is_ccvfs_file = 0;  // Default to non-CCVFS file
     pCcvfsFile->header_loaded = 0;
-    pCcvfsFile->pBlockIndex = NULL;
+    pCcvfsFile->pPageIndex = NULL;
     pCcvfsFile->index_dirty = 0;
     pCcvfsFile->index_capacity = 0;
     
@@ -93,10 +93,10 @@ int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile,
                 pCcvfsFile->is_ccvfs_file = 1;
                 CCVFS_DEBUG("Opened existing CCVFS file");
                 
-                // Load block index for existing CCVFS files
-                rc = ccvfs_load_block_index(pCcvfsFile);
+                // Load page index for existing CCVFS files
+                rc = ccvfs_load_page_index(pCcvfsFile);
                 if (rc != SQLITE_OK) {
-                    CCVFS_ERROR("Failed to load block index: %d", rc);
+                    CCVFS_ERROR("Failed to load page index: %d", rc);
                     pRealFile->pMethods->xClose(pRealFile);
                     return rc;
                 }

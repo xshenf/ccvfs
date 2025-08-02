@@ -30,7 +30,7 @@ typedef struct CCVFS {
     CompressAlgorithm *pCompressAlg; // 压缩算法实现
     EncryptAlgorithm *pEncryptAlg;   // 加密算法实现
     uint32_t creation_flags;        // 创建标志
-    uint32_t block_size;           // 块大小配置
+    uint32_t page_size;           // 页大小配置
 } CCVFS;
 ```
 
@@ -40,27 +40,27 @@ typedef struct CCVFSFileHeader {
     char magic[8];                  // 魔数标识 "CCVFS001"
     uint32_t version;              // 版本号
     uint32_t flags;                // 标志位
-    uint32_t block_size;           // 块大小
+    uint32_t page_size;           // 页大小
     uint32_t compress_algorithm;   // 压缩算法ID
     uint32_t encrypt_algorithm;    // 加密算法ID
     uint64_t original_size;        // 原始文件大小
     uint64_t compressed_size;      // 压缩后大小
-    uint64_t block_index_offset;   // 块索引偏移
-    uint32_t block_count;          // 块数量
+    uint64_t page_index_offset;   // 页索引偏移
+    uint32_t page_count;          // 页数量
     char reserved[64];             // 保留字段
 } CCVFSFileHeader;
 ```
 
-### 3. 块头结构
+### 3. 页头结构
 ```c
-typedef struct CCVFSBlockHeader {
-    uint32_t magic;                // 块魔数
-    uint32_t sequence;             // 块序号
-    uint32_t original_size;        // 原始块大小
+typedef struct CCVFSPageHeader {
+    uint32_t magic;                // 页魔数
+    uint32_t sequence;             // 页序号
+    uint32_t original_size;        // 原始页大小
     uint32_t compressed_size;      // 压缩后大小
     uint32_t checksum;             // 校验和
     uint32_t flags;                // 标志位
-} CCVFSBlockHeader;
+} CCVFSPageHeader;
 ```
 
 ## 文件布局
@@ -68,14 +68,14 @@ typedef struct CCVFSBlockHeader {
 压缩数据库文件采用以下布局：
 
 ```
-[文件头 128字节] [块索引表] [数据块1] [数据块2] ... [数据块N]
+[文件头 128字节] [页索引表] [数据页1] [数据页2] ... [数据页N]
 ```
 
 ### 详细布局说明：
 
 1. **文件头** (0-127字节): 包含文件元信息和配置
-2. **块索引表** (128字节开始): 每个块的位置和大小信息
-3. **数据块区域**: 压缩和加密后的实际数据块
+2. **页索引表** (128字节开始): 每个页的位置和大小信息
+3. **数据页区域**: 压缩和加密后的实际数据页
 
 ## 插入操作详解
 
@@ -87,7 +87,7 @@ typedef struct CCVFSBlockHeader {
 // 1. 创建 CCVFS 实例
 int sqlite3_ccvfs_create(const char *zVfsName, sqlite3_vfs *pRootVfs, 
                          const char *zCompressType, const char *zEncryptType,
-                         uint32_t blockSize, uint32_t flags);
+                         uint32_t pageSize, uint32_t flags);
 
 // 2. 打开数据库文件
 int sqlite3_open_v2(const char *filename, sqlite3 **ppDb,
@@ -97,7 +97,7 @@ int sqlite3_open_v2(const char *filename, sqlite3 **ppDb,
 **初始化流程：**
 1. 检查文件是否存在
 2. 如果是新文件，写入文件头
-3. 初始化块索引表
+3. 初始化页索引表
 4. 设置压缩和加密算法
 
 ### 2. 数据写入流程
@@ -111,34 +111,34 @@ static int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf,
 
 **写入步骤：**
 
-#### 步骤1: 确定目标块
+#### 步骤1: 确定目标页
 ```c
-// 计算数据属于哪个逻辑块
-uint32_t block_number = (uint32_t)(iOfst / pCcvfsFile->block_size);
-uint32_t block_offset = (uint32_t)(iOfst % pCcvfsFile->block_size);
+// 计算数据属于哪个逻辑页
+uint32_t page_number = (uint32_t)(iOfst / pCcvfsFile->page_size);
+uint32_t page_offset = (uint32_t)(iOfst % pCcvfsFile->page_size);
 ```
 
-#### 步骤2: 读取现有块数据（如果存在）
+#### 步骤2: 读取现有页数据（如果存在）
 ```c
-// 从压缩文件中读取并解压缩整个块
-int rc = readBlock(pCcvfsFile, block_number, block_buffer);
+// 从压缩文件中读取并解压缩整个页
+int rc = readPage(pCcvfsFile, page_number, page_buffer);
 ```
 
-#### 步骤3: 修改块数据
+#### 步骤3: 修改页数据
 ```c
-// 将新数据写入块缓冲区的相应位置
-memcpy(block_buffer + block_offset, zBuf, bytes_to_write);
+// 将新数据写入页缓冲区的相应位置
+memcpy(page_buffer + page_offset, zBuf, bytes_to_write);
 ```
 
-#### 步骤4: 压缩块数据
+#### 步骤4: 压缩页数据
 ```c
-// 使用配置的压缩算法压缩整个块
-uint32_t compressed_size = block_size;
-int rc = pCompressAlg->compress(block_buffer, block_size, 
+// 使用配置的压缩算法压缩整个页
+uint32_t compressed_size = page_size;
+int rc = pCompressAlg->compress(page_buffer, page_size, 
                                compressed_buffer, &compressed_size);
 ```
 
-#### 步骤5: 加密块数据（可选）
+#### 步骤5: 加密页数据（可选）
 ```c
 // 如果启用加密，对压缩后的数据进行加密
 if (pEncryptAlg) {
@@ -150,32 +150,32 @@ if (pEncryptAlg) {
 #### 步骤6: 写入物理文件
 ```c
 // 计算新的物理文件位置
-sqlite3_int64 physical_offset = calculatePhysicalOffset(pCcvfsFile, block_number);
+sqlite3_int64 physical_offset = calculatePhysicalOffset(pCcvfsFile, page_number);
 
-// 写入块头
-CCVFSBlockHeader header = {
-    .magic = CCVFS_BLOCK_MAGIC,
-    .sequence = block_number,
-    .original_size = block_size,
+// 写入页头
+CCVFSPageHeader header = {
+    .magic = CCVFS_PAGE_MAGIC,
+    .sequence = page_number,
+    .original_size = page_size,
     .compressed_size = final_size,
     .checksum = calculate_checksum(final_buffer, final_size),
     .flags = flags
 };
 
-// 写入块头和数据
+// 写入页头和数据
 pRootVfs->xWrite(pRealFile, &header, sizeof(header), physical_offset);
 pRootVfs->xWrite(pRealFile, final_buffer, final_size, 
                 physical_offset + sizeof(header));
 ```
 
-#### 步骤7: 更新块索引
+#### 步骤7: 更新页索引
 ```c
-// 更新内存中的块索引
-pCcvfsFile->block_index[block_number].offset = physical_offset;
-pCcvfsFile->block_index[block_number].size = final_size;
+// 更新内存中的页索引
+pCcvfsFile->page_index[page_number].offset = physical_offset;
+pCcvfsFile->page_index[page_number].size = final_size;
 
 // 保存索引到文件
-saveBlockIndex(pCcvfsFile);
+savePageIndex(pCcvfsFile);
 ```
 
 ### 3. 写入优化机制
@@ -185,8 +185,8 @@ saveBlockIndex(pCcvfsFile);
 - 事务提交时批量写入物理文件
 - 减少重复的压缩/解压缩操作
 
-**块缓存机制：**
-- 保持最近访问的块在内存中
+**页缓存机制：**
+- 保持最近访问的页在内存中
 - 避免频繁的磁盘 I/O 操作
 - LRU 策略管理缓存
 
@@ -203,19 +203,19 @@ static int ccvfsIoRead(sqlite3_file *pFile, void *zBuf,
 
 **读取步骤：**
 
-#### 步骤1: 确定源块
+#### 步骤1: 确定源页
 ```c
-// 计算数据所在的逻辑块
-uint32_t block_number = (uint32_t)(iOfst / pCcvfsFile->block_size);
-uint32_t block_offset = (uint32_t)(iOfst % pCcvfsFile->block_size);
+// 计算数据所在的逻辑页
+uint32_t page_number = (uint32_t)(iOfst / pCcvfsFile->page_size);
+uint32_t page_offset = (uint32_t)(iOfst % pCcvfsFile->page_size);
 ```
 
-#### 步骤2: 检查块缓存
+#### 步骤2: 检查页缓存
 ```c
-// 检查块是否已在内存缓存中
-if (isBlockCached(pCcvfsFile, block_number)) {
+// 检查页是否已在内存缓存中
+if (isPageCached(pCcvfsFile, page_number)) {
     // 直接从缓存读取
-    memcpy(zBuf, cached_block + block_offset, iAmt);
+    memcpy(zBuf, cached_page + page_offset, iAmt);
     return SQLITE_OK;
 }
 ```
@@ -223,16 +223,16 @@ if (isBlockCached(pCcvfsFile, block_number)) {
 #### 步骤3: 从物理文件读取
 ```c
 // 根据块索引获取物理位置
-sqlite3_int64 physical_offset = pCcvfsFile->block_index[block_number].offset;
-uint32_t compressed_size = pCcvfsFile->block_index[block_number].size;
+sqlite3_int64 physical_offset = pCcvfsFile->page_index[page_number].offset;
+uint32_t compressed_size = pCcvfsFile->page_index[page_number].size;
 
 // 读取块头
-CCVFSBlockHeader header;
+CCVFSPageHeader header;
 pRootVfs->xRead(pRealFile, &header, sizeof(header), physical_offset);
 
 // 验证块头
-if (header.magic != CCVFS_BLOCK_MAGIC || 
-    header.sequence != block_number) {
+if (header.magic != CCVFS_PAGE_MAGIC || 
+    header.sequence != page_number) {
     return SQLITE_CORRUPT;
 }
 
@@ -256,7 +256,7 @@ if (pEncryptAlg) {
 // 解压缩数据到原始大小
 uint32_t decompressed_size = header.original_size;
 rc = pCompressAlg->decompress(source_buffer, source_size,
-                             block_buffer, &decompressed_size);
+                             page_buffer, &decompressed_size);
 if (rc != SQLITE_OK) return SQLITE_CORRUPT;
 ```
 
@@ -272,10 +272,10 @@ if (calculated_checksum != header.checksum) {
 #### 步骤7: 返回请求的数据
 ```c
 // 从解压缩的块中提取请求的数据
-memcpy(zBuf, block_buffer + block_offset, iAmt);
+memcpy(zBuf, page_buffer + page_offset, iAmt);
 
 // 将块添加到缓存
-addBlockToCache(pCcvfsFile, block_number, block_buffer);
+addPageToCache(pCcvfsFile, page_number, page_buffer);
 ```
 
 ### 2. 查询优化机制
@@ -293,9 +293,9 @@ addBlockToCache(pCcvfsFile, block_number, block_buffer);
 **块预取策略：**
 ```c
 // 检测顺序访问模式
-if (isSequentialAccess(pCcvfsFile, block_number)) {
+if (isSequentialAccess(pCcvfsFile, page_number)) {
     // 预取下一个块
-    prefetchBlock(pCcvfsFile, block_number + 1);
+    prefetchPage(pCcvfsFile, page_number + 1);
 }
 ```
 
@@ -363,13 +363,13 @@ Zlib    | 80%    | 中等     | 快       | 高
 
 **损坏块处理：**
 ```c
-if (block_checksum_failed) {
+if (page_checksum_failed) {
     // 尝试从备份中恢复
-    if (has_backup_block) {
-        restore_from_backup(block_number);
+    if (has_backup_page) {
+        restore_from_backup(page_number);
     } else {
         // 标记块为损坏，返回错误
-        mark_block_corrupted(block_number);
+        mark_page_corrupted(page_number);
         return SQLITE_CORRUPT;
     }
 }

@@ -1,7 +1,7 @@
 /*
  * Large Database Stress Test
  * Tests the CCVFS mapping table with a substantial amount of data
- * Verifies performance and integrity with many blocks
+ * Verifies performance and integrity with many pages
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -108,7 +108,7 @@ int test_large_database() {
     
     printf("✅ Database opened successfully\n");
     
-    // Set page size to 64KB to match CCVFS block size
+    // Set page size to 64KB to match CCVFS page size
     char *err_msg = NULL;
     rc = sqlite3_exec(db, "PRAGMA page_size=65536;", 0, 0, &err_msg);
     if (rc != SQLITE_OK) {
