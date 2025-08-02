@@ -25,7 +25,7 @@ typedef enum {
 // Configuration structure
 typedef struct {
     char *output_file;
-    long target_size;           // Target file size in bytes
+    double target_size;           // Target file size in bytes
     int use_compression;        // Use CCVFS compression
     char *compress_algorithm;   // Compression algorithm
     char *encrypt_algorithm;    // Encryption algorithm
@@ -736,7 +736,7 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
 }
 
 // Parse size string (e.g., "10MB", "500KB", "2GB")
-static long parse_size_string(const char *size_str) {
+static double parse_size_string(const char *size_str) {
     if (!size_str) return 0;
     
     char *endptr;
@@ -754,12 +754,13 @@ static long parse_size_string(const char *size_str) {
             value *= 1024 * 1024;
         } else if (strcasecmp(endptr, "GB") == 0 || strcasecmp(endptr, "G") == 0) {
             value *= 1024 * 1024 * 1024;
+            printf("%f\n", value);
         } else {
             return 0;  // Invalid suffix
         }
     }
     
-    return (long)value;
+    return value;
 }
 
 // Parse page size string
@@ -958,7 +959,7 @@ int main(int argc, char *argv[]) {
     config.target_size = parse_size_string(argv[optind + 1]);
     
     if (config.target_size <= 0) {
-        fprintf(stderr, "错误: 无效的目标大小 '%s'\n", argv[optind + 1]);
+        fprintf(stderr, "错误: 无效的目标大小 '%s' %ld\n", argv[optind + 1], config.target_size);
         return 1;
     }
     
@@ -967,7 +968,7 @@ int main(int argc, char *argv[]) {
     
     printf("=== 数据库生成工具 ===\n");
     printf("输出文件: %s\n", config.output_file);
-    printf("目标大小: %ld 字节 (%.2f MB)\n", config.target_size, config.target_size / (1024.0 * 1024.0));
+    printf("目标大小: %f 字节 (%.2f MB)\n", config.target_size, config.target_size / (1024.0 * 1024.0));
     printf("压缩: %s\n", config.use_compression ? "是" : "否");
     printf("Journal模式: %s\n", config.use_wal_mode ? "WAL" : "DELETE");
     if (config.use_compression) {
