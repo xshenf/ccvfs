@@ -9,8 +9,38 @@
 #include "compress_vfs.h"
 #include "ccvfs_algorithm.h"
 
+// Clean up old test files
+void cleanup_test_files() {
+    printf("🧹 Cleaning up old test files...\n");
+    
+    // Remove main database file
+    if (remove("vfs_test.db") == 0) {
+        printf("   Removed vfs_test.db\n");
+    }
+    
+    // Remove journal file
+    if (remove("vfs_test.db-journal") == 0) {
+        printf("   Removed vfs_test.db-journal\n");
+    }
+    
+    // Remove WAL file (if exists)
+    if (remove("vfs_test.db-wal") == 0) {
+        printf("   Removed vfs_test.db-wal\n");
+    }
+    
+    // Remove SHM file (if exists)
+    if (remove("vfs_test.db-shm") == 0) {
+        printf("   Removed vfs_test.db-shm\n");
+    }
+    
+    printf("✅ Cleanup completed\n\n");
+}
+
 int test_vfs_connection() {
     printf("=== Testing VFS Connection ===\n");
+    
+    // Clean up before testing
+    cleanup_test_files();
     
     // Initialize algorithms
     ccvfs_init_builtin_algorithms();
