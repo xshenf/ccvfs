@@ -113,7 +113,7 @@ int main(int argc, char *argv[]) {
     const char *compress_algo = "zlib";
     const char *encrypt_algo = NULL;  // Default to no encryption
     int compression_level = 6;
-    uint32_t page_size = CCVFS_DEFAULT_PAGE_SIZE;  // Default to 64KB
+    uint32_t page_size = 0;  // Will be auto-detected from source database
     int verbose = 0;
     int rc;
     
@@ -186,6 +186,28 @@ int main(int argc, char *argv[]) {
         
         const char *source_db = argv[optind + 1];
         const char *target_db = argv[optind + 2];
+        
+        // Auto-detect page size from source database if not specified
+        if (page_size == 0) {
+            sqlite3 *db = NULL;
+            int rc_open = sqlite3_open_v2(source_db, &db, SQLITE_OPEN_READONLY, NULL);
+            if (rc_open == SQLITE_OK) {
+                sqlite3_stmt *stmt = NULL;
+                rc_open = sqlite3_prepare_v2(db, "PRAGMA page_size", -1, &stmt, NULL);
+                if (rc_open == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+                    page_size = (uint32_t)sqlite3_column_int(stmt, 0);
+                    printf("检测到源数据库页大小: %u 字节 (%u KB)\n", page_size, page_size / 1024);
+                }
+                if (stmt) sqlite3_finalize(stmt);
+                sqlite3_close(db);
+            }
+            
+            // Fallback to default if detection failed
+            if (page_size == 0) {
+                page_size = CCVFS_DEFAULT_PAGE_SIZE;
+                printf("无法检测页大小，使用默认值: %u 字节 (%u KB)\n", page_size, page_size / 1024);
+            }
+        }
         
         if (verbose) {
             printf("压缩参数:\n");

@@ -319,7 +319,7 @@ int ccvfs_expand_page_index(CCVFSFile *pFile, uint32_t new_page_count) {
         pFile->header.total_pages = new_page_count;
         pFile->index_dirty = 1; // Mark as dirty since we're changing it
         
-        CCVFS_INFO("Expanded page count to %u (within capacity %u)", 
+        CCVFS_DEBUG("Expanded page count to %u (within capacity %u)",
                   new_page_count, pFile->index_capacity);
         return SQLITE_OK;
     }

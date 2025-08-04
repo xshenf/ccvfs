@@ -57,7 +57,11 @@
       "Bash(cp test1.db test1_copy.db)",
       "Bash(./db_compare.exe --help)",
       "Bash(./db_compare.exe test1.db test1_copy.db)",
-      "Bash(./db_compare.exe:*)"
+      "Bash(./db_compare.exe:*)",
+      "Bash(CCVFS_DEBUG=1 ./db_tool.exe compress test1.db test1_compressed.ccvfs --compress-algo zlib)",
+      "Bash(export CCVFS_DEBUG=1)",
+      "Bash(CCVFS_DEBUG=1 ./db_tool.exe compress vfs_test.db vfs_test_compressed.ccvfs --compress-algo zlib)",
+      "Bash(ninja)"
     ],
     "deny": []
   }
