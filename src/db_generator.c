@@ -48,13 +48,23 @@ static long get_file_size(const char *filename) {
     return -1;
 }
 
-// Generate random string
+// Generate random string - optimized version with pre-generated random data
 static void generate_random_string(char *buffer, int length) {
     const char charset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ";
     int charset_size = sizeof(charset) - 1;
     
+    // Generate multiple random values at once to reduce rand() calls
+    static unsigned int rand_cache = 0;
+    static int rand_bits = 0;
+    
     for (int i = 0; i < length - 1; i++) {
-        buffer[i] = charset[rand() % charset_size];
+        if (rand_bits < 8) {
+            rand_cache = rand();
+            rand_bits = 32;
+        }
+        buffer[i] = charset[(rand_cache & 0xFF) % charset_size];
+        rand_cache >>= 8;
+        rand_bits -= 8;
     }
     buffer[length - 1] = '\0';
 }
@@ -105,8 +115,20 @@ static void generate_data(char *buffer, int length, DataMode mode, int record_id
             break;
             
         case DATA_MODE_BINARY:
-            for (int i = 0; i < length - 1; i++) {
-                buffer[i] = (char)(rand() % 256);
+            // Optimized binary data generation
+            {
+                static unsigned int rand_cache = 0;
+                static int rand_bits = 0;
+                
+                for (int i = 0; i < length - 1; i++) {
+                    if (rand_bits < 8) {
+                        rand_cache = rand();
+                        rand_bits = 32;
+                    }
+                    buffer[i] = (char)(rand_cache & 0xFF);
+                    rand_cache >>= 8;
+                    rand_bits -= 8;
+                }
             }
             buffer[length - 1] = '\0';
             break;
@@ -119,8 +141,18 @@ static void generate_data(char *buffer, int length, DataMode mode, int record_id
             } else if (record_id % 4 == 2) {
                 snprintf(buffer, length, "Mixed_Record_%d_Time_%ld", record_id, time(NULL));
             } else {
+                // Optimized printable ASCII generation
+                static unsigned int rand_cache = 0;
+                static int rand_bits = 0;
+                
                 for (int i = 0; i < length - 1; i++) {
-                    buffer[i] = (char)(32 + (rand() % 95));  // Printable ASCII only
+                    if (rand_bits < 8) {
+                        rand_cache = rand();
+                        rand_bits = 32;
+                    }
+                    buffer[i] = (char)(32 + ((rand_cache & 0xFF) % 95));
+                    rand_cache >>= 8;
+                    rand_bits -= 8;
                 }
                 buffer[length - 1] = '\0';
             }
@@ -660,12 +692,16 @@ static int generate_table_data(sqlite3 *db, const char *table_name, int table_su
     return SQLITE_ERROR;
 }
 
-// Generate database content with realistic data
+// Generate database content with realistic data - optimized version
 static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
     int record_id = 0;
     long current_size = 0;
     time_t start_time = time(NULL);
     int records_inserted = 0;
+    int size_check_counter = 0;  // Only check file size periodically
+    
+    // Increase batch size for better performance
+    int effective_batch_size = config->batch_size * 5;  // 5x larger batches
     
     // Start transaction
     sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
@@ -681,6 +717,7 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
         case DATA_MODE_MIXED: printf("混合数据\n"); break;
     }
     printf("表数量: %d\n", config->table_count);
+    printf("批量大小优化: %d -> %d\n", config->batch_size, effective_batch_size);
     printf("\n");
     
     while (current_size < config->target_size) {
@@ -702,15 +739,25 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
         record_id++;
         records_inserted++;
         
-        // Commit transaction periodically
-        if (record_id % config->batch_size == 0) {
+        // Commit transaction periodically with larger batches
+        if (record_id % effective_batch_size == 0) {
             sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
             sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
             
-            // Check current file size
-            current_size = get_file_size(config->output_file);
+            // Only check file size every few commits to reduce I/O
+            size_check_counter++;
+            if (size_check_counter >= 3) {  // Check size every 3 commits
+                current_size = get_file_size(config->output_file);
+                size_check_counter = 0;
+                
+                if (current_size >= config->target_size) {
+                    break;
+                }
+            }
             
-            if (config->verbose || record_id % (config->batch_size * 10) == 0) {
+            // Less frequent progress updates
+            if (config->verbose || record_id % (effective_batch_size * 2) == 0) {
+                if (current_size == 0) current_size = get_file_size(config->output_file);
                 time_t current_time = time(NULL);
                 double elapsed = difftime(current_time, start_time);
                 double progress = (double)current_size / config->target_size * 100.0;
@@ -719,10 +766,6 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
                        progress, current_size, config->target_size, records_inserted,
                        records_inserted / (elapsed > 0 ? elapsed : 1));
                 fflush(stdout);
-            }
-            
-            if (current_size >= config->target_size) {
-                break;
             }
         }
     }
@@ -963,6 +1006,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
+    // Optimize batch size based on target size
+    if (config.target_size > 100 * 1024 * 1024) {  // > 100MB
+        config.batch_size = 5000;  // Larger batches for big files
+    } else if (config.target_size > 10 * 1024 * 1024) {  // > 10MB
+        config.batch_size = 2000;
+    }
+    
     // Initialize random seed
     srand((unsigned int)time(NULL));
     
@@ -1017,14 +1067,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    // Configure database
+    // Configure database for performance
     if (config.use_wal_mode) {
         sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
     } else {
         sqlite3_exec(db, "PRAGMA journal_mode=DELETE", NULL, NULL, NULL);
     }
-    sqlite3_exec(db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA cache_size=-2000", NULL, NULL, NULL);  // 2MB cache
+    sqlite3_exec(db, "PRAGMA synchronous=OFF", NULL, NULL, NULL);  // Faster writes
+    sqlite3_exec(db, "PRAGMA cache_size=-8000", NULL, NULL, NULL);  // 8MB cache
+    sqlite3_exec(db, "PRAGMA temp_store=MEMORY", NULL, NULL, NULL);  // Memory temp storage
+    sqlite3_exec(db, "PRAGMA mmap_size=268435456", NULL, NULL, NULL);  // 256MB mmap
     
     time_t start_time = time(NULL);
     
