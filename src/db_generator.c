@@ -719,6 +719,14 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
     printf("批量大小: %d\n", effective_batch_size);
     printf("\n");
     
+    
+    // Progress tracking variables for DELETE journal mode
+    static double estimated_bytes_per_record = 0;
+    static double calibration_factor = 1.0;
+    static int last_calibration_records = 0;
+    static int calibration_count = 0;
+    static double running_average_bytes_per_record = 0;
+    
     while (current_size < (long)config->target_size) {
         int table_index = record_id % config->table_count;
         int table_def_index = table_index % table_definitions_count;
@@ -745,11 +753,11 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
             // Force flush to disk before checking size
             if (config->use_wal_mode) {
                 sqlite3_exec(db, "PRAGMA wal_checkpoint(FULL)", NULL, NULL, NULL);
-            } else {
+            } /*else {
                 // In DELETE mode, force a sync to ensure data is written to disk
                 sqlite3_exec(db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
                 sqlite3_exec(db, "PRAGMA synchronous=OFF", NULL, NULL, NULL);
-            }
+            }*/
             
             // Check file size after commit
             current_size = get_file_size(config->output_file);
@@ -763,17 +771,98 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
             // Show progress
             time_t current_time = time(NULL);
             double elapsed = difftime(current_time, start_time);
-            double progress = (double)current_size / config->target_size * 100.0;
+            double progress;
             
-            printf("\r进度: %.1f%% (%ld/%.0f 字节) - %d 记录 - %.1f 记录/秒",
-                   progress, current_size, config->target_size, records_inserted,
-                   records_inserted / (elapsed > 0 ? elapsed : 1));
+            // In non-WAL mode, file size might be 0 during transactions (DELETE journal mode)
+            // Use record-based estimation if file size is 0 after inserting records
+            if (current_size == 0 && records_inserted > 100) {
+                // In DELETE journal mode, use improved calibration system
+                // More frequent calibration for better accuracy
+                if (records_inserted >= 500 && (last_calibration_records == 0 || (records_inserted - last_calibration_records) >= 500)) {
+                    // Force a commit to get actual file size for calibration
+                    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+                    long calibration_size = get_file_size(config->output_file);
+                    if (calibration_size > 0) {
+                        double actual_bytes_per_record = (double)calibration_size / records_inserted;
+                        calibration_count++;
+                        
+                        // Use running average for stability
+                        if (running_average_bytes_per_record == 0) {
+                            running_average_bytes_per_record = actual_bytes_per_record;
+                        } else {
+                            // Weighted average (give more weight to recent measurements)
+                            running_average_bytes_per_record = running_average_bytes_per_record * 0.7 + actual_bytes_per_record * 0.3;
+                        }
+                        
+                        if (estimated_bytes_per_record > 0) {
+                            // Conservative calibration factor update
+                            double new_factor = running_average_bytes_per_record / estimated_bytes_per_record;
+                            calibration_factor = calibration_factor * 0.8 + new_factor * 0.2; // Smooth transition
+                            printf("\n[校准 #%d] 实际: %.1f 字节/记录, 平均: %.1f, 校准因子: %.3f\n", 
+                                   calibration_count, actual_bytes_per_record, running_average_bytes_per_record, calibration_factor);
+                        } else {
+                            calibration_factor = 1.0;
+                        }
+                        
+                        estimated_bytes_per_record = running_average_bytes_per_record;
+                        last_calibration_records = records_inserted;
+                    }
+                    // Restart transaction
+                    sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+                }
+                
+                if (estimated_bytes_per_record == 0) {
+                    // Very conservative initial estimate
+                    estimated_bytes_per_record = config->record_size * 0.6; // Even more conservative
+                }
+                
+                // Apply calibration factor to estimation with safety cap
+                double base_estimate = records_inserted * estimated_bytes_per_record;
+                double calibrated_estimated_size = base_estimate * calibration_factor;
+                
+                // Safety cap: don't let calibration factor push us too far
+                if (calibration_factor > 2.0) {
+                    calibrated_estimated_size = base_estimate * 2.0;
+                }
+                
+                progress = calibrated_estimated_size / config->target_size * 100.0;
+                
+                printf("\r进度: %.1f%% (估算: %d 记录, ~%.1f MB) - %.1f 记录/秒 [%s]",
+                       progress, records_inserted, calibrated_estimated_size / (1024*1024),
+                       records_inserted / (elapsed > 0 ? elapsed : 1),
+                       (calibration_count > 0) ? "智能校准" : "保守估算");
+            } else {
+                // Use file size based progress (WAL mode or final result)
+                progress = (current_size > 0) ? (double)current_size / config->target_size * 100.0 : 0.0;
+                
+                printf("\r进度: %.1f%% (%.2f MB/%.2f MB) - %d 记录 - %.1f 记录/秒",
+                       progress, current_size / (1024.0*1024.0), config->target_size / (1024.0*1024.0), records_inserted,
+                       records_inserted / (elapsed > 0 ? elapsed : 1));
+            }
             fflush(stdout);
             
             // Check if we've reached the target size - break before starting new transaction
             if (current_size >= (long)config->target_size) {
                 printf("\n目标大小已达到，停止生成数据\n");
                 break;
+            }
+            
+            // In estimation mode (DELETE journal), use smart threshold based on calibration quality
+            if (current_size == 0 && records_inserted > 100) {
+                // Use adaptive threshold based on calibration confidence
+                double threshold;
+                if (calibration_count >= 3) {
+                    threshold = 95.0; // High confidence - stop at 95%
+                } else if (calibration_count >= 1) {
+                    threshold = 90.0; // Some calibration - stop at 90%
+                } else {
+                    threshold = 85.0; // No calibration - very conservative 85%
+                }
+                
+                if (progress >= threshold) {
+                    printf("\n基于智能估算已达到目标 (阈值: %.1f%%, 校准次数: %d)，停止生成数据\n", threshold, calibration_count);
+                    break;
+                }
             }
             
             // Start new transaction
