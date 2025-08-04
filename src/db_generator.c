@@ -698,16 +698,15 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
     long current_size = 0;
     time_t start_time = time(NULL);
     int records_inserted = 0;
-    int size_check_counter = 0;  // Only check file size periodically
     
-    // Increase batch size for better performance
-    int effective_batch_size = config->batch_size * 5;  // 5x larger batches
+    // Use smaller batch size for better size control
+    int effective_batch_size = 100;  // Use small batch size for precise control
     
     // Start transaction
     sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
     
     printf("开始生成数据库内容...\n");
-    printf("目标大小: %ld 字节 (%.2f MB)\n", config->target_size, config->target_size / (1024.0 * 1024.0));
+    printf("目标大小: %.0f 字节 (%.2f MB)\n", config->target_size, config->target_size / (1024.0 * 1024.0));
     printf("数据模式: ");
     switch (config->data_mode) {
         case DATA_MODE_RANDOM: printf("随机数据\n"); break;
@@ -717,10 +716,10 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
         case DATA_MODE_MIXED: printf("混合数据\n"); break;
     }
     printf("表数量: %d\n", config->table_count);
-    printf("批量大小优化: %d -> %d\n", config->batch_size, effective_batch_size);
+    printf("批量大小: %d\n", effective_batch_size);
     printf("\n");
     
-    while (current_size < config->target_size) {
+    while (current_size < (long)config->target_size) {
         int table_index = record_id % config->table_count;
         int table_def_index = table_index % table_definitions_count;
         const char *table_name = table_definitions[table_def_index].name;
@@ -739,34 +738,46 @@ static int generate_database_content(sqlite3 *db, GeneratorConfig *config) {
         record_id++;
         records_inserted++;
         
-        // Commit transaction periodically with larger batches
+        // Commit transaction periodically and check file size
         if (record_id % effective_batch_size == 0) {
             sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+            
+            // Force flush to disk before checking size
+            if (config->use_wal_mode) {
+                sqlite3_exec(db, "PRAGMA wal_checkpoint(FULL)", NULL, NULL, NULL);
+            } else {
+                // In DELETE mode, force a sync to ensure data is written to disk
+                sqlite3_exec(db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
+                sqlite3_exec(db, "PRAGMA synchronous=OFF", NULL, NULL, NULL);
+            }
+            
+            // Check file size after commit
+            current_size = get_file_size(config->output_file);
+            
+            // Debug output
+            if (config->verbose && record_id % (effective_batch_size * 10) == 0) {
+                printf("\n[DEBUG] 记录数: %d, 文件大小: %ld 字节, 目标: %.0f 字节\n", 
+                       records_inserted, current_size, config->target_size);
+            }
+            
+            // Show progress
+            time_t current_time = time(NULL);
+            double elapsed = difftime(current_time, start_time);
+            double progress = (double)current_size / config->target_size * 100.0;
+            
+            printf("\r进度: %.1f%% (%ld/%.0f 字节) - %d 记录 - %.1f 记录/秒",
+                   progress, current_size, config->target_size, records_inserted,
+                   records_inserted / (elapsed > 0 ? elapsed : 1));
+            fflush(stdout);
+            
+            // Check if we've reached the target size - break before starting new transaction
+            if (current_size >= (long)config->target_size) {
+                printf("\n目标大小已达到，停止生成数据\n");
+                break;
+            }
+            
+            // Start new transaction
             sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
-            
-            // Only check file size every few commits to reduce I/O
-            size_check_counter++;
-            if (size_check_counter >= 3) {  // Check size every 3 commits
-                current_size = get_file_size(config->output_file);
-                size_check_counter = 0;
-                
-                if (current_size >= config->target_size) {
-                    break;
-                }
-            }
-            
-            // Less frequent progress updates
-            if (config->verbose || record_id % (effective_batch_size * 2) == 0) {
-                if (current_size == 0) current_size = get_file_size(config->output_file);
-                time_t current_time = time(NULL);
-                double elapsed = difftime(current_time, start_time);
-                double progress = (double)current_size / config->target_size * 100.0;
-                
-                printf("\r进度: %.1f%% (%ld/%ld 字节) - %d 记录 - %.1f 记录/秒",
-                       progress, current_size, config->target_size, records_inserted,
-                       records_inserted / (elapsed > 0 ? elapsed : 1));
-                fflush(stdout);
-            }
         }
     }
     
@@ -1018,7 +1029,7 @@ int main(int argc, char *argv[]) {
     
     printf("=== 数据库生成工具 ===\n");
     printf("输出文件: %s\n", config.output_file);
-    printf("目标大小: %f 字节 (%.2f MB)\n", config.target_size, config.target_size / (1024.0 * 1024.0));
+    printf("目标大小: %.0f 字节 (%.2f MB)\n", config.target_size, config.target_size / (1024.0 * 1024.0));
     printf("压缩: %s\n", config.use_compression ? "是" : "否");
     printf("Journal模式: %s\n", config.use_wal_mode ? "WAL" : "DELETE");
     if (config.use_compression) {
