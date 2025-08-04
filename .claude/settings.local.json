@@ -53,7 +53,11 @@
       "Bash(set CCVFS_DEBUG=1)",
       "Bash(E:/workspace/sqlitecc/cmake-build-release/simple_large_test.exe)",
       "Bash(timeout:*)",
-      "Bash(cp include/ccvfs_page.h include/ccvfs_page.h)"
+      "Bash(cp include/ccvfs_page.h include/ccvfs_page.h)",
+      "Bash(cp test1.db test1_copy.db)",
+      "Bash(./db_compare.exe --help)",
+      "Bash(./db_compare.exe test1.db test1_copy.db)",
+      "Bash(./db_compare.exe:*)"
     ],
     "deny": []
   }

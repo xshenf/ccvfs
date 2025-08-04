@@ -112,10 +112,15 @@ target_link_libraries(db_generator sqlitecc)
 add_executable(simple_db_test test/simple_db_test.c)
 target_link_libraries(simple_db_test sqlitecc)
 
+# 数据库比对工具
+add_executable(db_compare src/db_compare.c)
+target_link_libraries(db_compare sqlitecc)
+
 # 链接数学库（某些平台需要）
 if(UNIX AND NOT APPLE)
     target_link_libraries(shell m)
     target_link_libraries(db_tool m)
     target_link_libraries(db_generator m)
     target_link_libraries(simple_db_test m)
+    target_link_libraries(db_compare m)
 endif()
