@@ -9,17 +9,86 @@ static void ccvfs_update_space_tracking(CCVFSFile *pFile);
 static sqlite3_int64 ccvfs_find_best_fit_space(CCVFSFile *pFile, uint32_t requiredSize, uint32_t *pWastedSpace);
 static void ccvfs_report_file_health(CCVFSFile *pFile);
 
+// Hole management function declarations
+static int ccvfs_remove_hole(CCVFSFile *pFile, sqlite3_int64 offset);
+static void ccvfs_merge_adjacent_holes(CCVFSFile *pFile);
+static void ccvfs_cleanup_small_holes(CCVFSFile *pFile);
+static void ccvfs_check_hole_maintenance_threshold(CCVFSFile *pFile);
+
 /*
  * 寻找最佳匹配的可用空间洞或间隙来满足所需大小
- * 暂时禁用：总是返回0以使用文件末尾分配策略，确保稳定性
+ * 使用最佳适配算法：选择能容纳所需大小的最小空洞
  * Find the best fitting available space hole or gap for the required size
- * DISABLED: Always return 0 to use end-of-file allocation for stability
+ * Uses best-fit algorithm: select the smallest hole that can accommodate the required size
  */
 static sqlite3_int64 ccvfs_find_best_fit_space(CCVFSFile *pFile, uint32_t requiredSize, uint32_t *pWastedSpace) {
-    // 暂时完全禁用空洞检测算法
-    // Disable hole detection completely for now
+    CCVFSHoleManager *pManager = &pFile->hole_manager;
+    CCVFSSpaceHole *pCurrent, *pBestFit;
+    sqlite3_int64 bestOffset = 0;
+    uint32_t bestWastedSpace = UINT32_MAX;
+    
+    CCVFS_DEBUG("Searching for best-fit hole: required_size=%u", requiredSize);
+    
+    // Initialize output parameter
     *pWastedSpace = 0;
-    return 0;
+    
+    // Check if hole detection is enabled
+    if (!pManager->enabled) {
+        CCVFS_DEBUG("Hole detection disabled, returning 0");
+        return 0;
+    }
+    
+    // Check if we have any holes to search
+    if (pManager->hole_count == 0) {
+        CCVFS_DEBUG("No holes available for allocation");
+        return 0;
+    }
+    
+    // Search through all holes for the best fit
+    pCurrent = pManager->holes;
+    pBestFit = NULL;
+    
+    while (pCurrent) {
+        // Check if this hole can accommodate the required size
+        if (pCurrent->size >= requiredSize) {
+            uint32_t wastedSpace = pCurrent->size - requiredSize;
+            
+            CCVFS_DEBUG("Evaluating hole[%llu,%u]: waste=%u", 
+                       (unsigned long long)pCurrent->offset, pCurrent->size, wastedSpace);
+            
+            // Check if this is a better fit than our current best
+            if (wastedSpace < bestWastedSpace) {
+                pBestFit = pCurrent;
+                bestOffset = pCurrent->offset;
+                bestWastedSpace = wastedSpace;
+                
+                CCVFS_DEBUG("New best fit: hole[%llu,%u], waste=%u", 
+                           (unsigned long long)bestOffset, pCurrent->size, bestWastedSpace);
+                
+                // Perfect fit found, no need to search further
+                if (wastedSpace == 0) {
+                    CCVFS_DEBUG("Perfect fit found, stopping search");
+                    break;
+                }
+            }
+        } else {
+            CCVFS_DEBUG("Hole[%llu,%u] too small for required size %u", 
+                       (unsigned long long)pCurrent->offset, pCurrent->size, requiredSize);
+        }
+        
+        pCurrent = pCurrent->next;
+    }
+    
+    // Return results
+    if (pBestFit) {
+        *pWastedSpace = bestWastedSpace;
+        CCVFS_DEBUG("Best-fit search result: offset=%llu, hole_size=%u, required=%u, waste=%u", 
+                   (unsigned long long)bestOffset, pBestFit->size, requiredSize, bestWastedSpace);
+        return bestOffset;
+    } else {
+        CCVFS_DEBUG("No suitable hole found for size %u", requiredSize);
+        return 0;
+    }
 }
 
 /*
@@ -92,6 +161,12 @@ int ccvfsIoClose(sqlite3_file *pFile) {
     if (p->pPageIndex) {
         sqlite3_free(p->pPageIndex);
         p->pPageIndex = NULL;
+    }
+
+    // 清理空洞管理器
+    // Clean up hole manager
+    if (p->is_ccvfs_file) {
+        ccvfs_cleanup_hole_manager(p);
     }
 
     // 在关闭前报告文件健康状态
@@ -487,6 +562,19 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
     
     if (isZeroPage) {
         CCVFS_DEBUG("Page %u is all zeros, treating as sparse", pageNum);
+        
+        // If page previously had physical storage, add it as a hole
+        if (pIndex->physical_offset != 0 && pIndex->compressed_size > 0) {
+            CCVFS_DEBUG("Converting page %u from physical to sparse, adding hole[%llu,%u]",
+                       pageNum, (unsigned long long)pIndex->physical_offset, pIndex->compressed_size);
+            
+            int rc = ccvfs_add_hole(pFile, pIndex->physical_offset, pIndex->compressed_size);
+            if (rc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to add hole for sparse page conversion: %d", rc);
+                // Continue anyway, don't fail the operation
+            }
+        }
+        
         pIndex->physical_offset = 0;
         pIndex->compressed_size = 0;
         pIndex->original_size = dataSize;
@@ -636,13 +724,29 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
                     CCVFS_DEBUG("扩展现有页在偏移 %llu: %u->%u 字节 (+%u 扩展, %.1fx 增长)",
                                (unsigned long long)writeOffset, existingSpace, compressedSize, expansionNeeded, growthRatio);
                 } else {
-                    // 不能安全扩展 - 分配新空间
+                    // 不能安全扩展 - 分配新空间并添加旧空间为空洞
                     CCVFS_DEBUG("不能安全扩展（相邻页或EOF），分配新空间");
+                    
+                    // Add the old space as a hole since we're abandoning it
+                    int rc = ccvfs_add_hole(pFile, pIndex->physical_offset, existingSpace);
+                    if (rc != SQLITE_OK) {
+                        CCVFS_ERROR("Failed to add hole for abandoned page space: %d", rc);
+                        // Continue anyway, don't fail the operation
+                    }
+                    
                     pFile->new_allocation_count++;
                     goto allocate_new_space;
                 }
             } else {
                 CCVFS_DEBUG("获取文件大小失败，用于扩展检查，分配新空间");
+                
+                // Add the old space as a hole since we're abandoning it
+                int rc = ccvfs_add_hole(pFile, pIndex->physical_offset, existingSpace);
+                if (rc != SQLITE_OK) {
+                    CCVFS_ERROR("Failed to add hole for abandoned page space: %d", rc);
+                    // Continue anyway, don't fail the operation
+                }
+                
                 pFile->new_allocation_count++;
                 goto allocate_new_space;
             }
@@ -657,11 +761,18 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
         writeOffset = ccvfs_find_best_fit_space(pFile, compressedSize, &wastedSpace);
         
         if (writeOffset > 0) {
-            // 找到合适的空洞 - 使用它
+            // 找到合适的空洞 - 使用它并更新空洞记录
             pFile->hole_reclaim_count++;
             pFile->best_fit_count++;
             CCVFS_DEBUG("使用最佳适配空洞在偏移 %llu 存储 %u 字节 (浪费: %u)", 
                        (unsigned long long)writeOffset, compressedSize, wastedSpace);
+            
+            // Allocate space from the hole (remove or split the hole)
+            int rc = ccvfs_allocate_from_hole(pFile, writeOffset, compressedSize);
+            if (rc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to allocate from hole: %d", rc);
+                // Continue anyway, the allocation might still work
+            }
         } else {
             // 没有找到合适的空洞 - 追加到文件末尾
             sqlite3_int64 fileSize;
@@ -689,6 +800,34 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
             } else {
                 CCVFS_DEBUG("在文件末尾分配新页: 偏移 %llu (顺序: %u)",
                            (unsigned long long)writeOffset, pFile->sequential_write_count);
+            }
+        }
+    }
+    
+    // Verify that the allocated space is valid and safe to write to
+    if (writeOffset < CCVFS_DATA_PAGES_OFFSET) {
+        CCVFS_ERROR("Invalid write offset %llu < %d (reserved space)", 
+                   (unsigned long long)writeOffset, CCVFS_DATA_PAGES_OFFSET);
+        if (encryptedData) sqlite3_free(encryptedData);
+        if (compressedData) sqlite3_free(compressedData);
+        return SQLITE_IOERR;
+    }
+    
+    // Additional safety check: ensure we don't overwrite existing page data
+    for (uint32_t i = 0; i < pFile->header.total_pages; i++) {
+        if (i != pageNum && pFile->pPageIndex[i].physical_offset != 0) {
+            sqlite3_int64 otherStart = pFile->pPageIndex[i].physical_offset;
+            sqlite3_int64 otherEnd = otherStart + pFile->pPageIndex[i].compressed_size;
+            sqlite3_int64 writeEnd = writeOffset + compressedSize;
+            
+            // Check for overlap
+            if ((writeOffset < otherEnd && writeEnd > otherStart)) {
+                CCVFS_ERROR("Write would overlap with page %u: write[%llu,%llu] vs existing[%llu,%llu]",
+                           i, (unsigned long long)writeOffset, (unsigned long long)writeEnd,
+                           (unsigned long long)otherStart, (unsigned long long)otherEnd);
+                if (encryptedData) sqlite3_free(encryptedData);
+                if (compressedData) sqlite3_free(compressedData);
+                return SQLITE_IOERR;
             }
         }
     }
@@ -1066,6 +1205,21 @@ int ccvfsIoSync(sqlite3_file *pFile, int flags) {
         }
     }
     
+    // 执行空洞维护操作（仅对CCVFS文件）
+    // Perform hole maintenance operations (only for CCVFS files)
+    if (p->is_ccvfs_file && p->hole_manager.enabled) {
+        CCVFS_DEBUG("Performing hole maintenance during sync");
+        
+        // Merge adjacent holes to reduce fragmentation
+        ccvfs_merge_adjacent_holes(p);
+        
+        // Clean up holes that are too small to be useful
+        ccvfs_cleanup_small_holes(p);
+        
+        CCVFS_DEBUG("Hole maintenance completed: %u holes remaining", 
+                   p->hole_manager.hole_count);
+    }
+    
     // 同步底层文件
     // Sync underlying file
     if (p->pReal && p->pReal->pMethods->xSync) {
@@ -1305,4 +1459,591 @@ int ccvfsIoFetch(sqlite3_file *pFile, sqlite3_int64 iOfst, int iAmt, void **pp) 
 int ccvfsIoUnfetch(sqlite3_file *pFile, sqlite3_int64 iOfst, void *pPage) {
     CCVFS_DEBUG("Unfetch operation not supported for compressed VFS");
     return SQLITE_OK;
+}
+
+// ============================================================================
+// HOLE MANAGEMENT IMPLEMENTATION
+// ============================================================================
+
+/*
+ * 初始化空洞管理器
+ * Initialize hole manager with default configuration
+ */
+int ccvfs_init_hole_manager(CCVFSFile *pFile) {
+    CCVFSHoleManager *pManager = &pFile->hole_manager;
+    
+    CCVFS_DEBUG("Initializing hole manager for file: %s", pFile->filename ? pFile->filename : "unknown");
+    
+    // Initialize hole manager structure
+    memset(pManager, 0, sizeof(CCVFSHoleManager));
+    
+    // Set configuration from VFS settings
+    if (pFile->pOwner) {
+        pManager->enabled = pFile->pOwner->enable_hole_detection;
+        pManager->max_holes = pFile->pOwner->max_holes;
+        pManager->min_hole_size = pFile->pOwner->min_hole_size;
+    } else {
+        // Use defaults if no VFS owner
+        pManager->enabled = 1;
+        pManager->max_holes = CCVFS_DEFAULT_MAX_HOLES;
+        pManager->min_hole_size = CCVFS_DEFAULT_MIN_HOLE_SIZE;
+    }
+    
+    // Validate configuration parameters
+    if (pManager->max_holes < CCVFS_MIN_MAX_HOLES) {
+        CCVFS_DEBUG("Adjusting max_holes from %u to minimum %u", 
+                   pManager->max_holes, CCVFS_MIN_MAX_HOLES);
+        pManager->max_holes = CCVFS_MIN_MAX_HOLES;
+    } else if (pManager->max_holes > CCVFS_MAX_MAX_HOLES) {
+        CCVFS_DEBUG("Adjusting max_holes from %u to maximum %u", 
+                   pManager->max_holes, CCVFS_MAX_MAX_HOLES);
+        pManager->max_holes = CCVFS_MAX_MAX_HOLES;
+    }
+    
+    if (pManager->min_hole_size < CCVFS_MIN_HOLE_SIZE) {
+        CCVFS_DEBUG("Adjusting min_hole_size from %u to minimum %u", 
+                   pManager->min_hole_size, CCVFS_MIN_HOLE_SIZE);
+        pManager->min_hole_size = CCVFS_MIN_HOLE_SIZE;
+    } else if (pManager->min_hole_size > CCVFS_MAX_HOLE_SIZE) {
+        CCVFS_DEBUG("Adjusting min_hole_size from %u to maximum %u", 
+                   pManager->min_hole_size, CCVFS_MAX_HOLE_SIZE);
+        pManager->min_hole_size = CCVFS_MAX_HOLE_SIZE;
+    }
+    
+    // Initialize hole list
+    pManager->holes = NULL;
+    pManager->hole_count = 0;
+    
+    // Initialize hole statistics
+    pFile->hole_allocation_count = 0;
+    pFile->hole_merge_count = 0;
+    pFile->hole_cleanup_count = 0;
+    pFile->hole_operations_count = 0;
+    
+    CCVFS_INFO("Hole manager initialized: enabled=%d, max_holes=%u, min_hole_size=%u", 
+              pManager->enabled, pManager->max_holes, pManager->min_hole_size);
+    
+    return SQLITE_OK;
+}
+
+/*
+ * 清理空洞管理器
+ * Clean up hole manager and free all allocated memory
+ */
+void ccvfs_cleanup_hole_manager(CCVFSFile *pFile) {
+    CCVFSHoleManager *pManager = &pFile->hole_manager;
+    CCVFSSpaceHole *pHole, *pNext;
+    
+    CCVFS_DEBUG("Cleaning up hole manager for file: %s", pFile->filename ? pFile->filename : "unknown");
+    
+    if (!pManager) {
+        return;
+    }
+    
+    // Free all holes in the linked list
+    pHole = pManager->holes;
+    while (pHole) {
+        pNext = pHole->next;
+        sqlite3_free(pHole);
+        pHole = pNext;
+    }
+    
+    // Report final statistics
+    if (pManager->hole_count > 0 || pFile->hole_allocation_count > 0) {
+        CCVFS_INFO("Hole manager cleanup stats: tracked_holes=%u, allocations=%u, merges=%u, cleanups=%u",
+                  pManager->hole_count, pFile->hole_allocation_count, 
+                  pFile->hole_merge_count, pFile->hole_cleanup_count);
+    }
+    
+    // Reset hole manager structure
+    memset(pManager, 0, sizeof(CCVFSHoleManager));
+    
+    // Reset hole statistics
+    pFile->hole_allocation_count = 0;
+    pFile->hole_merge_count = 0;
+    pFile->hole_cleanup_count = 0;
+    
+    CCVFS_DEBUG("Hole manager cleanup completed");
+}
+
+/*
+ * 添加空洞到跟踪列表
+ * Add a hole to the tracking list with proper sorting and merging
+ */
+int ccvfs_add_hole(CCVFSFile *pFile, sqlite3_int64 offset, uint32_t size) {
+    CCVFSHoleManager *pManager = &pFile->hole_manager;
+    CCVFSSpaceHole *pNewHole, *pCurrent, *pPrev;
+    
+    CCVFS_DEBUG("Adding hole: offset=%llu, size=%u", (unsigned long long)offset, size);
+    
+    // Check if hole detection is enabled
+    if (!pManager->enabled) {
+        CCVFS_DEBUG("Hole detection disabled, ignoring hole");
+        return SQLITE_OK;
+    }
+    
+    // Validate hole parameters
+    if (offset < 0 || size == 0) {
+        CCVFS_ERROR("Invalid hole parameters: offset=%lld, size=%u", offset, size);
+        return SQLITE_ERROR;
+    }
+    
+    // Check if hole is too small to track
+    if (size < pManager->min_hole_size) {
+        CCVFS_DEBUG("Hole too small to track: size=%u < min=%u", size, pManager->min_hole_size);
+        return SQLITE_OK;
+    }
+    
+    // Check for overlaps with existing holes and merge if adjacent
+    pCurrent = pManager->holes;
+    pPrev = NULL;
+    
+    while (pCurrent) {
+        sqlite3_int64 currentEnd = pCurrent->offset + pCurrent->size;
+        sqlite3_int64 newEnd = offset + size;
+        
+        // Check for overlap or adjacency
+        if ((offset <= currentEnd && newEnd >= pCurrent->offset) ||
+            (offset == currentEnd) || (newEnd == pCurrent->offset)) {
+            
+            // Merge with existing hole
+            sqlite3_int64 mergedStart = (offset < pCurrent->offset) ? offset : pCurrent->offset;
+            sqlite3_int64 mergedEnd = (newEnd > currentEnd) ? newEnd : currentEnd;
+            uint32_t mergedSize = (uint32_t)(mergedEnd - mergedStart);
+            
+            CCVFS_DEBUG("Merging holes: existing[%llu,%u] + new[%llu,%u] = merged[%llu,%u]",
+                       (unsigned long long)pCurrent->offset, pCurrent->size,
+                       (unsigned long long)offset, size,
+                       (unsigned long long)mergedStart, mergedSize);
+            
+            // Update existing hole with merged parameters
+            pCurrent->offset = mergedStart;
+            pCurrent->size = mergedSize;
+            
+            pFile->hole_merge_count++;
+            
+            // Check if we need to merge with the next hole too
+            CCVFSSpaceHole *pNext = pCurrent->next;
+            if (pNext && (mergedStart + mergedSize) >= pNext->offset) {
+                // Merge with next hole as well
+                sqlite3_int64 nextEnd = pNext->offset + pNext->size;
+                if (nextEnd > mergedEnd) {
+                    mergedEnd = nextEnd;
+                }
+                pCurrent->size = (uint32_t)(mergedEnd - mergedStart);
+                
+                // Remove the next hole from the list
+                pCurrent->next = pNext->next;
+                sqlite3_free(pNext);
+                pManager->hole_count--;
+                
+                CCVFS_DEBUG("Triple merge completed: final hole[%llu,%u]",
+                           (unsigned long long)pCurrent->offset, pCurrent->size);
+            }
+            
+            return SQLITE_OK;
+        }
+        
+        // If we've passed the insertion point, break
+        if (pCurrent->offset > offset) {
+            break;
+        }
+        
+        pPrev = pCurrent;
+        pCurrent = pCurrent->next;
+    }
+    
+    // Check if we've reached the maximum number of holes
+    if (pManager->hole_count >= pManager->max_holes) {
+        CCVFS_DEBUG("Maximum holes reached (%u), removing smallest hole", pManager->max_holes);
+        
+        // Find and remove the smallest hole
+        CCVFSSpaceHole *pSmallest = pManager->holes;
+        CCVFSSpaceHole *pSmallestPrev = NULL;
+        CCVFSSpaceHole *pSearch = pManager->holes;
+        CCVFSSpaceHole *pSearchPrev = NULL;
+        
+        while (pSearch) {
+            if (pSearch->size < pSmallest->size) {
+                pSmallest = pSearch;
+                pSmallestPrev = pSearchPrev;
+            }
+            pSearchPrev = pSearch;
+            pSearch = pSearch->next;
+        }
+        
+        // Only remove if the new hole is larger than the smallest
+        if (size > pSmallest->size) {
+            CCVFS_DEBUG("Removing smallest hole[%llu,%u] to make room for new hole[%llu,%u]",
+                       (unsigned long long)pSmallest->offset, pSmallest->size,
+                       (unsigned long long)offset, size);
+            
+            if (pSmallestPrev) {
+                pSmallestPrev->next = pSmallest->next;
+            } else {
+                pManager->holes = pSmallest->next;
+            }
+            sqlite3_free(pSmallest);
+            pManager->hole_count--;
+            pFile->hole_cleanup_count++;
+        } else {
+            CCVFS_DEBUG("New hole[%llu,%u] not larger than smallest[%llu,%u], ignoring",
+                       (unsigned long long)offset, size,
+                       (unsigned long long)pSmallest->offset, pSmallest->size);
+            return SQLITE_OK;
+        }
+    }
+    
+    // Allocate new hole structure
+    pNewHole = (CCVFSSpaceHole*)sqlite3_malloc(sizeof(CCVFSSpaceHole));
+    if (!pNewHole) {
+        CCVFS_ERROR("Failed to allocate memory for new hole");
+        return SQLITE_NOMEM;
+    }
+    
+    // Initialize new hole
+    pNewHole->offset = offset;
+    pNewHole->size = size;
+    pNewHole->next = pCurrent;
+    
+    // Insert into sorted list
+    if (pPrev) {
+        pPrev->next = pNewHole;
+    } else {
+        pManager->holes = pNewHole;
+    }
+    
+    pManager->hole_count++;
+    
+    CCVFS_DEBUG("Successfully added hole[%llu,%u], total holes: %u",
+               (unsigned long long)offset, size, pManager->hole_count);
+    
+    // Check if maintenance is needed
+    ccvfs_check_hole_maintenance_threshold(pFile);
+    
+    return SQLITE_OK;
+}/*
+ *
+ 从跟踪列表中移除空洞或分割空洞
+ * Remove hole from tracking list or split hole if only part is used
+ */
+static int ccvfs_remove_hole(CCVFSFile *pFile, sqlite3_int64 offset) {
+    CCVFSHoleManager *pManager = &pFile->hole_manager;
+    CCVFSSpaceHole *pCurrent, *pPrev;
+    
+    CCVFS_DEBUG("Removing/updating hole at offset: %llu", (unsigned long long)offset);
+    
+    // Check if hole detection is enabled
+    if (!pManager->enabled) {
+        CCVFS_DEBUG("Hole detection disabled, ignoring remove request");
+        return SQLITE_OK;
+    }
+    
+    // Find the hole that contains this offset
+    pCurrent = pManager->holes;
+    pPrev = NULL;
+    
+    while (pCurrent) {
+        sqlite3_int64 holeEnd = pCurrent->offset + pCurrent->size;
+        
+        // Check if the offset falls within this hole
+        if (offset >= pCurrent->offset && offset < holeEnd) {
+            CCVFS_DEBUG("Found hole[%llu,%u] containing offset %llu",
+                       (unsigned long long)pCurrent->offset, pCurrent->size,
+                       (unsigned long long)offset);
+            
+            // Remove the entire hole from the list
+            if (pPrev) {
+                pPrev->next = pCurrent->next;
+            } else {
+                pManager->holes = pCurrent->next;
+            }
+            
+            sqlite3_free(pCurrent);
+            pManager->hole_count--;
+            
+            CCVFS_DEBUG("Removed hole, remaining holes: %u", pManager->hole_count);
+            return SQLITE_OK;
+        }
+        
+        pPrev = pCurrent;
+        pCurrent = pCurrent->next;
+    }
+    
+    CCVFS_DEBUG("No hole found containing offset %llu", (unsigned long long)offset);
+    return SQLITE_OK;
+}
+
+/*
+ * 从跟踪列表中移除或分割指定大小的空洞
+ * Remove or split hole when allocating specific size from it
+ */
+int ccvfs_allocate_from_hole(CCVFSFile *pFile, sqlite3_int64 offset, uint32_t allocSize) {
+    CCVFSHoleManager *pManager = &pFile->hole_manager;
+    CCVFSSpaceHole *pCurrent, *pPrev;
+    
+    CCVFS_DEBUG("Allocating %u bytes from hole at offset: %llu", allocSize, (unsigned long long)offset);
+    
+    // Check if hole detection is enabled
+    if (!pManager->enabled) {
+        CCVFS_DEBUG("Hole detection disabled, ignoring allocation request");
+        return SQLITE_OK;
+    }
+    
+    // Find the hole that contains this offset
+    pCurrent = pManager->holes;
+    pPrev = NULL;
+    
+    while (pCurrent) {
+        sqlite3_int64 holeEnd = pCurrent->offset + pCurrent->size;
+        
+        // Check if the offset falls within this hole and we have enough space
+        if (offset >= pCurrent->offset && offset < holeEnd && 
+            (offset + allocSize) <= holeEnd) {
+            
+            CCVFS_DEBUG("Found suitable hole[%llu,%u] for allocation[%llu,%u]",
+                       (unsigned long long)pCurrent->offset, pCurrent->size,
+                       (unsigned long long)offset, allocSize);
+            
+            // Calculate remaining space before and after allocation
+            uint32_t spaceBefore = (uint32_t)(offset - pCurrent->offset);
+            uint32_t spaceAfter = (uint32_t)(holeEnd - (offset + allocSize));
+            
+            CCVFS_DEBUG("Space before: %u, space after: %u", spaceBefore, spaceAfter);
+            
+            // Case 1: Allocation uses the entire hole
+            if (spaceBefore == 0 && spaceAfter == 0) {
+                CCVFS_DEBUG("Allocation uses entire hole, removing hole");
+                
+                if (pPrev) {
+                    pPrev->next = pCurrent->next;
+                } else {
+                    pManager->holes = pCurrent->next;
+                }
+                
+                sqlite3_free(pCurrent);
+                pManager->hole_count--;
+                
+            } 
+            // Case 2: Allocation at the beginning, keep the end part
+            else if (spaceBefore == 0 && spaceAfter >= pManager->min_hole_size) {
+                CCVFS_DEBUG("Allocation at beginning, keeping end part[%llu,%u]",
+                           (unsigned long long)(offset + allocSize), spaceAfter);
+                
+                pCurrent->offset = offset + allocSize;
+                pCurrent->size = spaceAfter;
+                
+            }
+            // Case 3: Allocation at the end, keep the beginning part
+            else if (spaceAfter == 0 && spaceBefore >= pManager->min_hole_size) {
+                CCVFS_DEBUG("Allocation at end, keeping beginning part[%llu,%u]",
+                           (unsigned long long)pCurrent->offset, spaceBefore);
+                
+                pCurrent->size = spaceBefore;
+                
+            }
+            // Case 4: Allocation in the middle, split into two holes
+            else if (spaceBefore >= pManager->min_hole_size && spaceAfter >= pManager->min_hole_size) {
+                CCVFS_DEBUG("Allocation in middle, splitting into two holes");
+                
+                // Create new hole for the space after allocation
+                CCVFSSpaceHole *pNewHole = (CCVFSSpaceHole*)sqlite3_malloc(sizeof(CCVFSSpaceHole));
+                if (!pNewHole) {
+                    CCVFS_ERROR("Failed to allocate memory for split hole");
+                    return SQLITE_NOMEM;
+                }
+                
+                pNewHole->offset = offset + allocSize;
+                pNewHole->size = spaceAfter;
+                pNewHole->next = pCurrent->next;
+                
+                // Update current hole to keep the space before allocation
+                pCurrent->size = spaceBefore;
+                pCurrent->next = pNewHole;
+                
+                pManager->hole_count++;
+                
+                CCVFS_DEBUG("Split complete: hole1[%llu,%u], hole2[%llu,%u]",
+                           (unsigned long long)pCurrent->offset, pCurrent->size,
+                           (unsigned long long)pNewHole->offset, pNewHole->size);
+                
+            }
+            // Case 5: One or both remaining parts are too small, remove entire hole
+            else {
+                CCVFS_DEBUG("Remaining parts too small, removing entire hole");
+                
+                if (pPrev) {
+                    pPrev->next = pCurrent->next;
+                } else {
+                    pManager->holes = pCurrent->next;
+                }
+                
+                sqlite3_free(pCurrent);
+                pManager->hole_count--;
+                pFile->hole_cleanup_count++;
+            }
+            
+            pFile->hole_allocation_count++;
+            CCVFS_DEBUG("Hole allocation completed, remaining holes: %u", pManager->hole_count);
+            
+            // Check if maintenance is needed
+            ccvfs_check_hole_maintenance_threshold(pFile);
+            
+            return SQLITE_OK;
+        }
+        
+        pPrev = pCurrent;
+        pCurrent = pCurrent->next;
+    }
+    
+    CCVFS_DEBUG("No suitable hole found for allocation at offset %llu", (unsigned long long)offset);
+    return SQLITE_OK;
+}/*
+ * 
+合并相邻或重叠的空洞
+ * Merge adjacent or overlapping holes to reduce fragmentation
+ */
+static void ccvfs_merge_adjacent_holes(CCVFSFile *pFile) {
+    CCVFSHoleManager *pManager = &pFile->hole_manager;
+    CCVFSSpaceHole *pCurrent, *pNext;
+    int mergeCount = 0;
+    
+    CCVFS_DEBUG("Starting hole merge operation: %u holes", pManager->hole_count);
+    
+    if (!pManager->enabled || pManager->hole_count < 2) {
+        CCVFS_DEBUG("Merge not needed: enabled=%d, hole_count=%u", 
+                   pManager->enabled, pManager->hole_count);
+        return;
+    }
+    
+    pCurrent = pManager->holes;
+    
+    while (pCurrent && pCurrent->next) {
+        pNext = pCurrent->next;
+        
+        sqlite3_int64 currentEnd = pCurrent->offset + pCurrent->size;
+        sqlite3_int64 nextEnd = pNext->offset + pNext->size;
+        
+        // Check if holes are adjacent or overlapping
+        if (currentEnd >= pNext->offset) {
+            CCVFS_DEBUG("Merging adjacent holes: [%llu,%u] + [%llu,%u]",
+                       (unsigned long long)pCurrent->offset, pCurrent->size,
+                       (unsigned long long)pNext->offset, pNext->size);
+            
+            // Merge the holes
+            sqlite3_int64 mergedStart = (pCurrent->offset < pNext->offset) ? 
+                                       pCurrent->offset : pNext->offset;
+            sqlite3_int64 mergedEnd = (currentEnd > nextEnd) ? currentEnd : nextEnd;
+            
+            pCurrent->offset = mergedStart;
+            pCurrent->size = (uint32_t)(mergedEnd - mergedStart);
+            
+            // Remove the next hole from the list
+            pCurrent->next = pNext->next;
+            sqlite3_free(pNext);
+            pManager->hole_count--;
+            mergeCount++;
+            
+            CCVFS_DEBUG("Merged result: [%llu,%u], remaining holes: %u",
+                       (unsigned long long)pCurrent->offset, pCurrent->size, 
+                       pManager->hole_count);
+            
+            // Continue with the same current hole in case there are more merges
+            continue;
+        }
+        
+        pCurrent = pNext;
+    }
+    
+    if (mergeCount > 0) {
+        pFile->hole_merge_count += mergeCount;
+        CCVFS_INFO("Merged %d holes, total merges: %u, remaining holes: %u",
+                  mergeCount, pFile->hole_merge_count, pManager->hole_count);
+    } else {
+        CCVFS_DEBUG("No adjacent holes found to merge");
+    }
+}
+
+/*
+ * 清理过小的空洞
+ * Remove holes that are too small to be useful
+ */
+static void ccvfs_cleanup_small_holes(CCVFSFile *pFile) {
+    CCVFSHoleManager *pManager = &pFile->hole_manager;
+    CCVFSSpaceHole *pCurrent, *pPrev, *pNext;
+    int cleanupCount = 0;
+    
+    CCVFS_DEBUG("Starting small hole cleanup: min_size=%u, hole_count=%u", 
+               pManager->min_hole_size, pManager->hole_count);
+    
+    if (!pManager->enabled || pManager->hole_count == 0) {
+        CCVFS_DEBUG("Cleanup not needed: enabled=%d, hole_count=%u", 
+                   pManager->enabled, pManager->hole_count);
+        return;
+    }
+    
+    pCurrent = pManager->holes;
+    pPrev = NULL;
+    
+    while (pCurrent) {
+        pNext = pCurrent->next;
+        
+        if (pCurrent->size < pManager->min_hole_size) {
+            CCVFS_DEBUG("Removing small hole: [%llu,%u] < min_size=%u",
+                       (unsigned long long)pCurrent->offset, pCurrent->size,
+                       pManager->min_hole_size);
+            
+            // Remove the hole from the list
+            if (pPrev) {
+                pPrev->next = pNext;
+            } else {
+                pManager->holes = pNext;
+            }
+            
+            sqlite3_free(pCurrent);
+            pManager->hole_count--;
+            cleanupCount++;
+            
+            // Don't update pPrev since we removed the current node
+            pCurrent = pNext;
+        } else {
+            pPrev = pCurrent;
+            pCurrent = pNext;
+        }
+    }
+    
+    if (cleanupCount > 0) {
+        pFile->hole_cleanup_count += cleanupCount;
+        CCVFS_INFO("Cleaned up %d small holes, total cleanups: %u, remaining holes: %u",
+                  cleanupCount, pFile->hole_cleanup_count, pManager->hole_count);
+    } else {
+        CCVFS_DEBUG("No small holes found to cleanup");
+    }
+}/*
+ * 检查是
+否需要执行空洞维护
+ * Check if hole maintenance should be triggered based on operation count
+ */
+static void ccvfs_check_hole_maintenance_threshold(CCVFSFile *pFile) {
+    const uint32_t MAINTENANCE_THRESHOLD = 50; // Trigger maintenance every 50 operations
+    
+    if (!pFile->is_ccvfs_file || !pFile->hole_manager.enabled) {
+        return;
+    }
+    
+    pFile->hole_operations_count++;
+    
+    if (pFile->hole_operations_count >= MAINTENANCE_THRESHOLD) {
+        CCVFS_DEBUG("Triggering threshold-based hole maintenance (operations: %u)", 
+                   pFile->hole_operations_count);
+        
+        // Perform maintenance
+        ccvfs_merge_adjacent_holes(pFile);
+        ccvfs_cleanup_small_holes(pFile);
+        
+        // Reset counter
+        pFile->hole_operations_count = 0;
+        
+        CCVFS_DEBUG("Threshold-based maintenance completed");
+    }
 }

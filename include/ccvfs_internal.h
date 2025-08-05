@@ -50,6 +50,12 @@ typedef struct CCVFS {
     int strict_checksum_mode;   /* 严格校验和模式：1=严格，0=容错 Strict checksum mode: 1=strict, 0=tolerant */
     int enable_data_recovery;   /* 启用数据恢复策略 Enable data recovery strategies */
     int corruption_tolerance;   /* 数据损坏容忍级别 (0-100) Data corruption tolerance level (0-100) */
+    
+    // 空洞检测配置
+    // Hole detection configuration
+    int enable_hole_detection;  /* 启用空洞检测 Enable hole detection */
+    uint32_t max_holes;         /* 最大跟踪空洞数 Maximum holes to track */
+    uint32_t min_hole_size;     /* 最小跟踪空洞大小 Minimum hole size to track */
 } CCVFS;
 
 /*
@@ -81,6 +87,14 @@ typedef struct CCVFSFile {
     uint32_t best_fit_count;          /* Number of best-fit allocations */
     uint32_t sequential_write_count;  /* Number of sequential writes detected */
     uint32_t last_written_page;      /* Last page number written (for sequential detection) */
+    
+    // 空洞管理器和统计
+    // Hole manager and statistics
+    CCVFSHoleManager hole_manager;    /* Hole tracking system */
+    uint32_t hole_allocation_count;   /* Number of successful hole allocations */
+    uint32_t hole_merge_count;        /* Number of hole merge operations */
+    uint32_t hole_cleanup_count;      /* Number of small holes removed */
+    uint32_t hole_operations_count;   /* Counter for triggering maintenance */
     
     // 数据完整性统计和错误跟踪
     // Data integrity statistics and error tracking

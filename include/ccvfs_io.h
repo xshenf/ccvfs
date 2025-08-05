@@ -34,6 +34,14 @@ int ccvfsIoUnfetch(sqlite3_file *pFile, sqlite3_int64 iOfst, void *pPage);
  */
 extern sqlite3_io_methods ccvfsIoMethods;
 
+/*
+ * Hole management functions (declared here, defined in ccvfs_io.c)
+ */
+int ccvfs_init_hole_manager(CCVFSFile *pFile);
+void ccvfs_cleanup_hole_manager(CCVFSFile *pFile);
+int ccvfs_add_hole(CCVFSFile *pFile, sqlite3_int64 offset, uint32_t size);
+int ccvfs_allocate_from_hole(CCVFSFile *pFile, sqlite3_int64 offset, uint32_t allocSize);
+
 #ifdef __cplusplus
 }
 #endif

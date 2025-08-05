@@ -113,6 +113,17 @@ int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile,
         }
     }
     
+    // Initialize hole manager for CCVFS files
+    if (pCcvfsFile->is_ccvfs_file) {
+        rc = ccvfs_init_hole_manager(pCcvfsFile);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to initialize hole manager: %d", rc);
+            // Don't fail the open operation, just disable hole detection
+            pCcvfsFile->hole_manager.enabled = 0;
+            CCVFS_DEBUG("Hole detection disabled due to initialization failure");
+        }
+    }
+    
     CCVFS_DEBUG("Successfully opened file (CCVFS: %s)", 
                 pCcvfsFile->is_ccvfs_file ? "yes" : "no");
     return SQLITE_OK;

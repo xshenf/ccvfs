@@ -107,6 +107,16 @@ int sqlite3_ccvfs_create(
     pNew->creation_flags = flags;
     pNew->page_size = pageSize;  // Use the validated page size
     
+    // Initialize hole detection configuration with defaults
+    pNew->enable_hole_detection = 1;  // Enable by default
+    pNew->max_holes = CCVFS_DEFAULT_MAX_HOLES;
+    pNew->min_hole_size = CCVFS_DEFAULT_MIN_HOLE_SIZE;
+    
+    // Initialize data integrity configuration with defaults
+    pNew->strict_checksum_mode = 1;    // Strict mode by default
+    pNew->enable_data_recovery = 0;    // Disabled by default for safety
+    pNew->corruption_tolerance = 0;    // Zero tolerance by default
+    
     // Copy algorithm names
     char *pDest = (char*)&pNew[1] + nName;
     

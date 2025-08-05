@@ -50,6 +50,14 @@ extern "C" {
 #define CCVFS_CREATE_OFFLINE     (1 << 1)
 #define CCVFS_CREATE_HYBRID      (1 << 2)
 
+// Hole detection configuration constants
+#define CCVFS_DEFAULT_MAX_HOLES     256     // Default maximum holes to track
+#define CCVFS_MIN_MAX_HOLES         16      // Minimum allowed max holes
+#define CCVFS_MAX_MAX_HOLES         1024    // Maximum allowed max holes
+#define CCVFS_DEFAULT_MIN_HOLE_SIZE 64      // Default minimum hole size (bytes)
+#define CCVFS_MIN_HOLE_SIZE         16      // Minimum allowed hole size
+#define CCVFS_MAX_HOLE_SIZE         4096    // Maximum allowed hole size
+
 /*
  * File header structure (128 bytes)
  */
@@ -118,6 +126,26 @@ typedef struct {
     // Variable length data follows - 可变长度数据跟随
     // uint8_t data[];             // Compressed data (压缩数据)
 } CCVFSDataPage;
+
+/*
+ * Space hole structure for tracking available space - 空间洞结构用于跟踪可用空间
+ */
+typedef struct CCVFSSpaceHole {
+    sqlite3_int64 offset;           // Starting offset of the hole (空洞起始偏移)
+    uint32_t size;                  // Size of the hole in bytes (空洞大小，字节)
+    struct CCVFSSpaceHole *next;    // Next hole in the list (链表中的下一个空洞)
+} CCVFSSpaceHole;
+
+/*
+ * Hole manager structure for efficient space allocation - 空洞管理器结构用于高效空间分配
+ */
+typedef struct CCVFSHoleManager {
+    CCVFSSpaceHole *holes;          // Linked list of holes (空洞链表)
+    uint32_t hole_count;            // Number of tracked holes (跟踪的空洞数量)
+    uint32_t max_holes;             // Maximum holes to track (最大跟踪空洞数)
+    uint32_t min_hole_size;         // Minimum hole size to track (最小跟踪空洞大小)
+    int enabled;                    // Whether hole detection is enabled (是否启用空洞检测)
+} CCVFSHoleManager;
 
 /*
  * Compression algorithm interface
