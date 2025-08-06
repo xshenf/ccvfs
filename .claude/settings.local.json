@@ -62,7 +62,14 @@
       "Bash(export CCVFS_DEBUG=1)",
       "Bash(CCVFS_DEBUG=1 ./db_tool.exe compress vfs_test.db vfs_test_compressed.ccvfs --compress-algo zlib)",
       "Bash(ninja)",
-      "Bash(pkill db_generator)"
+      "Bash(pkill db_generator)",
+      "Bash(CCVFS_DEBUG=1 ./test_hole_detection.exe)",
+      "Bash(.test_hole_detection.exe)",
+      "Bash(./test_hole_detection.exe)",
+      "Bash(ninja test_hole_detection:*)",
+      "Bash(ninja:*)",
+      "Bash(CCVFS_DEBUG=1 ./simple_hole_test.exe)",
+      "Bash(./simple_hole_test.exe)"
     ],
     "deny": []
   }

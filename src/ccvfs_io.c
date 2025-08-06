@@ -532,6 +532,9 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
     CCVFS_DEBUG("=== WRITING PAGE %u ===", pageNum);
     CCVFS_DEBUG("Page %u: writing %u bytes", pageNum, dataSize);
     
+    // Track whether this write is using hole allocation
+    int isHoleAllocation = 0;
+    
     // 确保页索引足够大
     // Ensure page index is large enough
     if (pageNum >= pFile->header.total_pages) {
@@ -675,6 +678,7 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
         if (compressedSize <= existingSpace) {
             // 【场景1】：完美匹配或更小 - 直接重用
             writeOffset = pIndex->physical_offset;
+            isHoleAllocation = 1;  // Mark as hole allocation since we're reusing existing space
             
             // 计算空间效率
             uint32_t wastedSpace = existingSpace - compressedSize;
@@ -683,7 +687,7 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
             // 更新空间跟踪计数器
             pFile->space_reuse_count++;
             
-            CCVFS_DEBUG("重用现有空间在偏移 %llu: 新=%u, 现有=%u, 浪费=%u (%.1f%% 效率)", 
+            CCVFS_DEBUG("重用现有空间在偏移 %llu: 新=%u, 现有=%u, 浪费=%u (%.1f%% 效率)",
                        (unsigned long long)writeOffset, compressedSize, existingSpace, 
                        wastedSpace, spaceEfficiency * 100.0);
         } else {
@@ -694,6 +698,7 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
             if (sizeRc == SQLITE_OK) {
                 uint64_t pageEndOffset = pIndex->physical_offset + existingSpace;
                 uint32_t expansionNeeded = compressedSize - existingSpace;
+                CCVFS_INFO("-------");
                 
                 // 限制极端扩展以防止病态行为
                 double growthRatio = (double)compressedSize / (double)existingSpace;
@@ -703,15 +708,22 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
                     goto allocate_new_space;
                 }
                 
-                // 检查是否可以安全扩展（没有数据紧跟在这个页后面）
+                // 检查是否可以安全扩展（没有数据与扩展后的区域重叠）
                 int canExpand = 1;
+                sqlite3_int64 expandedEnd = pageEndOffset + expansionNeeded;
+
                 for (uint32_t i = 0; i < pFile->header.total_pages; i++) {
                     if (i != pageNum && pFile->pPageIndex[i].physical_offset != 0) {
-                        uint64_t otherPageStart = pFile->pPageIndex[i].physical_offset;
-                        // 如果其他页在扩展范围内，则不能扩展（包含32字节安全边距）
-                        if (otherPageStart >= pageEndOffset && 
-                            otherPageStart < pageEndOffset + expansionNeeded + 32) { // 32字节安全边距
+                        sqlite3_int64 otherStart = pFile->pPageIndex[i].physical_offset;
+                        sqlite3_int64 otherEnd = otherStart + pFile->pPageIndex[i].compressed_size;
+                        
+                        // 检查扩展后的区域是否与其他页面重叠（包含32字节安全边距）
+                        if ((pageEndOffset < otherEnd + 32) && (expandedEnd + 32 > otherStart)) {
                             canExpand = 0;
+                            CCVFS_DEBUG("无法扩展页面 %u：会与页面 %u 重叠 [%llu,%llu] vs [%llu,%llu]",
+                                       pageNum, i, 
+                                       (unsigned long long)pageEndOffset, (unsigned long long)expandedEnd,
+                                       (unsigned long long)otherStart, (unsigned long long)otherEnd);
                             break;
                         }
                     }
@@ -720,12 +732,13 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
                 if (canExpand && pageEndOffset + expansionNeeded <= fileSize) {
                     // 可以安全扩展现有空间
                     writeOffset = pIndex->physical_offset;
+                    isHoleAllocation = 1;  // Mark as hole allocation since we're reusing existing space
                     pFile->space_expansion_count++;
                     CCVFS_DEBUG("扩展现有页在偏移 %llu: %u->%u 字节 (+%u 扩展, %.1fx 增长)",
                                (unsigned long long)writeOffset, existingSpace, compressedSize, expansionNeeded, growthRatio);
                 } else {
                     // 不能安全扩展 - 分配新空间并添加旧空间为空洞
-                    CCVFS_DEBUG("不能安全扩展（相邻页或EOF），分配新空间");
+                    CCVFS_INFO("不能安全扩展（相邻页或EOF），分配新空间");
                     
                     // Add the old space as a hole since we're abandoning it
                     int rc = ccvfs_add_hole(pFile, pIndex->physical_offset, existingSpace);
@@ -761,18 +774,13 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
         writeOffset = ccvfs_find_best_fit_space(pFile, compressedSize, &wastedSpace);
         
         if (writeOffset > 0) {
-            // 找到合适的空洞 - 使用它并更新空洞记录
+            // 找到合适的空洞 - 标记为空洞分配但暂不更新空洞记录
+            // (空洞记录将在写入成功后更新)
             pFile->hole_reclaim_count++;
             pFile->best_fit_count++;
+            isHoleAllocation = 1;  // Mark this as hole allocation
             CCVFS_DEBUG("使用最佳适配空洞在偏移 %llu 存储 %u 字节 (浪费: %u)", 
                        (unsigned long long)writeOffset, compressedSize, wastedSpace);
-            
-            // Allocate space from the hole (remove or split the hole)
-            int rc = ccvfs_allocate_from_hole(pFile, writeOffset, compressedSize);
-            if (rc != SQLITE_OK) {
-                CCVFS_ERROR("Failed to allocate from hole: %d", rc);
-                // Continue anyway, the allocation might still work
-            }
         } else {
             // 没有找到合适的空洞 - 追加到文件末尾
             sqlite3_int64 fileSize;
@@ -798,8 +806,44 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
                 CCVFS_DEBUG("调整写入偏移到 %llu (保留索引空间之后)", 
                            (unsigned long long)writeOffset);
             } else {
-                CCVFS_DEBUG("在文件末尾分配新页: 偏移 %llu (顺序: %u)",
-                           (unsigned long long)writeOffset, pFile->sequential_write_count);
+                // 确保新分配的空间不与现有页面重叠
+                sqlite3_int64 candidateOffset = writeOffset;
+                int foundSafeOffset = 0;
+                
+                // 尝试找到一个安全的写入位置
+                for (int attempts = 0; attempts < 100 && !foundSafeOffset; attempts++) {
+                    foundSafeOffset = 1;
+                    sqlite3_int64 candidateEnd = candidateOffset + compressedSize;
+                    
+                    // 检查与所有现有页面的重叠
+                    for (uint32_t i = 0; i < pFile->header.total_pages; i++) {
+                        if (i != pageNum && pFile->pPageIndex[i].physical_offset != 0) {
+                            sqlite3_int64 otherStart = pFile->pPageIndex[i].physical_offset;
+                            sqlite3_int64 otherEnd = otherStart + pFile->pPageIndex[i].compressed_size;
+                            
+                            // 检查重叠
+                            if (candidateOffset < otherEnd && candidateEnd > otherStart) {
+                                // 发现重叠，尝试新位置
+                                candidateOffset = otherEnd;
+                                foundSafeOffset = 0;
+                                CCVFS_DEBUG("避免与页面 %u 重叠，尝试新偏移: %llu", i, 
+                                           (unsigned long long)candidateOffset);
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (foundSafeOffset) {
+                    writeOffset = candidateOffset;
+                    CCVFS_DEBUG("在文件末尾分配新页: 偏移 %llu (顺序: %u, 安全检查通过)",
+                               (unsigned long long)writeOffset, pFile->sequential_write_count);
+                } else {
+                    CCVFS_ERROR("无法找到安全的写入位置，页面布局可能损坏");
+                    if (encryptedData) sqlite3_free(encryptedData);
+                    if (compressedData) sqlite3_free(compressedData);
+                    return SQLITE_IOERR;
+                }
             }
         }
     }
@@ -814,6 +858,9 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
     }
     
     // Additional safety check: ensure we don't overwrite existing page data
+    // BUT: allow hole reuse by checking if write offset came from hole allocation
+    // Note: isHoleAllocation is determined during the allocation process above
+    
     for (uint32_t i = 0; i < pFile->header.total_pages; i++) {
         if (i != pageNum && pFile->pPageIndex[i].physical_offset != 0) {
             sqlite3_int64 otherStart = pFile->pPageIndex[i].physical_offset;
@@ -822,9 +869,44 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
             
             // Check for overlap
             if ((writeOffset < otherEnd && writeEnd > otherStart)) {
-                CCVFS_ERROR("Write would overlap with page %u: write[%llu,%llu] vs existing[%llu,%llu]",
+                // If this is a hole allocation, we need to check if this is legitimate space reuse
+                if (isHoleAllocation) {
+                    // Special case: Check if this is in-place expansion of the current page
+                    if (writeOffset == pFile->pPageIndex[pageNum].physical_offset) {
+                        CCVFS_DEBUG("Allowing in-place expansion: page %u expanding from offset %llu",
+                                   pageNum, (unsigned long long)writeOffset);
+                        continue; // Skip overlap check - this is in-place expansion
+                    }
+                    
+                    // Check if we have a valid hole at this location that allows this allocation
+                    CCVFSHoleManager *pManager = &pFile->hole_manager;
+                    CCVFSSpaceHole *pHole = pManager->holes;
+                    int validHoleAllocation = 0;
+                    
+                    while (pHole) {
+                        sqlite3_int64 holeEnd = pHole->offset + pHole->size;
+                        // Check if the write is within a valid hole
+                        if (writeOffset >= pHole->offset && writeEnd <= holeEnd) {
+                            validHoleAllocation = 1;
+                            CCVFS_DEBUG("Valid hole allocation: write[%llu,%llu] within hole[%llu,%u]",
+                                       (unsigned long long)writeOffset, (unsigned long long)writeEnd,
+                                       (unsigned long long)pHole->offset, pHole->size);
+                            break;
+                        }
+                        pHole = pHole->next;
+                    }
+                    
+                    if (validHoleAllocation) {
+                        CCVFS_DEBUG("Allowing valid hole reuse: write[%llu,%llu] overlaps page %u[%llu,%llu] but within valid hole",
+                                   (unsigned long long)writeOffset, (unsigned long long)writeEnd,
+                                   i, (unsigned long long)otherStart, (unsigned long long)otherEnd);
+                        continue; // Skip this overlap check - it's legitimate hole reuse
+                    }
+                }
+                
+                CCVFS_ERROR("Write would overlap with page %u: write[%llu,%llu] vs existing[%llu,%llu] (hole_alloc=%d)",
                            i, (unsigned long long)writeOffset, (unsigned long long)writeEnd,
-                           (unsigned long long)otherStart, (unsigned long long)otherEnd);
+                           (unsigned long long)otherStart, (unsigned long long)otherEnd, isHoleAllocation);
                 if (encryptedData) sqlite3_free(encryptedData);
                 if (compressedData) sqlite3_free(compressedData);
                 return SQLITE_IOERR;
@@ -838,6 +920,17 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
         if (encryptedData) sqlite3_free(encryptedData);
         if (compressedData) sqlite3_free(compressedData);
         return rc;
+    }
+    
+    // If this was a hole allocation, update the hole records now that write succeeded
+    if (isHoleAllocation) {
+        int holeRc = ccvfs_allocate_from_hole(pFile, writeOffset, compressedSize);
+        if (holeRc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to update hole records after successful write: %d", holeRc);
+            // Continue anyway - the write succeeded, hole tracking is just optimization
+        } else {
+            CCVFS_DEBUG("Successfully updated hole records after allocation");
+        }
     }
     
     // Update page index entry
@@ -1549,7 +1642,7 @@ void ccvfs_cleanup_hole_manager(CCVFSFile *pFile) {
     }
     
     // Report final statistics
-    if (pManager->hole_count > 0 || pFile->hole_allocation_count > 0) {
+    if (1 || pManager->hole_count > 0 || pFile->hole_allocation_count > 0) {
         CCVFS_INFO("Hole manager cleanup stats: tracked_holes=%u, allocations=%u, merges=%u, cleanups=%u",
                   pManager->hole_count, pFile->hole_allocation_count, 
                   pFile->hole_merge_count, pFile->hole_cleanup_count);

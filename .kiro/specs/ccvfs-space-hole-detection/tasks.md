@@ -88,6 +88,8 @@
     - _Requirements: 1.5, 5.3_
 
   - [ ] 4.3 Integrate best-fit allocation with existing writePage logic
+
+
     - Ensure hole allocation path in writePage calls ccvfs_find_best_fit_space
     - Handle allocation failures gracefully (fall back to end-of-file)
     - Verify allocated space is actually free before writing data

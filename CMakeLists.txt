@@ -116,6 +116,14 @@ target_link_libraries(simple_db_test sqlitecc)
 add_executable(db_compare src/db_compare.c)
 target_link_libraries(db_compare sqlitecc)
 
+# 空洞检测测试程序
+add_executable(test_hole_detection test/test_hole_detection.c)
+target_link_libraries(test_hole_detection sqlitecc)
+
+# 简化空洞检测测试程序
+add_executable(simple_hole_test test/simple_hole_test.c)
+target_link_libraries(simple_hole_test sqlitecc)
+
 # 链接数学库（某些平台需要）
 if(UNIX AND NOT APPLE)
     target_link_libraries(shell m)
@@ -123,4 +131,6 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(db_generator m)
     target_link_libraries(simple_db_test m)
     target_link_libraries(db_compare m)
+    target_link_libraries(test_hole_detection m)
+    target_link_libraries(simple_hole_test m)
 endif()
