@@ -42,6 +42,16 @@ void ccvfs_cleanup_hole_manager(CCVFSFile *pFile);
 int ccvfs_add_hole(CCVFSFile *pFile, sqlite3_int64 offset, uint32_t size);
 int ccvfs_allocate_from_hole(CCVFSFile *pFile, sqlite3_int64 offset, uint32_t allocSize);
 
+/*
+ * Write buffer management functions (declared here, defined in ccvfs_io.c)
+ */
+int ccvfs_init_write_buffer(CCVFSFile *pFile);
+void ccvfs_cleanup_write_buffer(CCVFSFile *pFile);
+int ccvfs_buffer_write(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *data, uint32_t dataSize);
+int ccvfs_buffer_read(CCVFSFile *pFile, uint32_t pageNum, unsigned char *buffer, uint32_t bufferSize);
+int ccvfs_flush_write_buffer(CCVFSFile *pFile);
+int ccvfs_flush_buffer_entry(CCVFSFile *pFile, uint32_t pageNum);
+
 #ifdef __cplusplus
 }
 #endif

@@ -124,6 +124,14 @@ target_link_libraries(test_hole_detection sqlitecc)
 add_executable(simple_hole_test test/simple_hole_test.c)
 target_link_libraries(simple_hole_test sqlitecc)
 
+# 批量写入缓冲测试程序
+add_executable(batch_write_buffer_test test/batch_write_buffer_test.c)
+target_link_libraries(batch_write_buffer_test sqlitecc)
+
+# 简单缓冲测试程序
+add_executable(simple_buffer_test test/simple_buffer_test.c)
+target_link_libraries(simple_buffer_test sqlitecc)
+
 # 链接数学库（某些平台需要）
 if(UNIX AND NOT APPLE)
     target_link_libraries(shell m)
@@ -133,4 +141,5 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(db_compare m)
     target_link_libraries(test_hole_detection m)
     target_link_libraries(simple_hole_test m)
+    target_link_libraries(batch_write_buffer_test m)
 endif()

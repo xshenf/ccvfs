@@ -69,7 +69,15 @@
       "Bash(ninja test_hole_detection:*)",
       "Bash(ninja:*)",
       "Bash(CCVFS_DEBUG=1 ./simple_hole_test.exe)",
-      "Bash(./simple_hole_test.exe)"
+      "Bash(./simple_hole_test.exe)",
+      "Bash(./batch_write_buffer_test.exe)",
+      "Bash(CCVFS_DEBUG=1 ./batch_write_buffer_test.exe)",
+      "Bash(./cmake-build-debug/simple_db_test.exe)",
+      "Bash(./simple_buffer_test.exe)",
+      "Bash(CCVFS_DEBUG=1 ./cmake-build-debug/batch_write_buffer_test.exe)",
+      "Bash(./cmake-build-debug/batch_write_buffer_test.exe)",
+      "Bash(./test_simple_buffer)",
+      "Bash(./debug_buffer_test:*)"
     ],
     "deny": []
   }

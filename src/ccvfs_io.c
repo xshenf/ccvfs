@@ -130,6 +130,17 @@ int ccvfsIoClose(sqlite3_file *pFile) {
     CCVFS_DEBUG("Closing CCVFS file");
     
     if (p->pReal) {
+        // 刷新写入缓冲区（如果启用）
+        // Flush write buffer if enabled
+        if (p->is_ccvfs_file && p->write_buffer.enabled && p->write_buffer.entry_count > 0) {
+            CCVFS_DEBUG("Flushing %u buffered entries before close", p->write_buffer.entry_count);
+            int flushRc = ccvfs_flush_write_buffer(p);
+            if (flushRc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to flush write buffer during close: %d", flushRc);
+                rc = flushRc;
+            }
+        }
+        
         // 关闭前保存页索引和文件头（仅对可写文件）
         // Save page index and header before closing (only for writable files)
         if (p->pPageIndex && p->header_loaded && !(p->open_flags & SQLITE_OPEN_READONLY)) {
@@ -161,6 +172,12 @@ int ccvfsIoClose(sqlite3_file *pFile) {
     if (p->pPageIndex) {
         sqlite3_free(p->pPageIndex);
         p->pPageIndex = NULL;
+    }
+
+    // 清理写入缓冲区
+    // Clean up write buffer
+    if (p->is_ccvfs_file) {
+        ccvfs_cleanup_write_buffer(p);
     }
 
     // 清理空洞管理器
@@ -466,9 +483,19 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
             CCVFS_DEBUG("Failed to load header, treating as empty file");
             return SQLITE_IOERR_SHORT_READ;
         }
+        
+        // Initialize write buffer if not already initialized
+        if (!p->write_buffer.enabled && p->pOwner && p->pOwner->enable_write_buffer) {
+            CCVFS_DEBUG("Initializing write buffer on header load");
+            rc = ccvfs_init_write_buffer(p);
+            if (rc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to initialize write buffer on read: %d", rc);
+                // Continue without buffering rather than failing
+            }
+        }
     }
     
-    // CCVFS file - use page-based reading
+    // CCVFS file - use page-based reading with buffer checking
     uint32_t pageSize = p->header.page_size;
     if (pageSize == 0) {
         CCVFS_ERROR("Invalid page size in header, using default");
@@ -479,8 +506,8 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
     uint32_t startPage = getPageNumber(iOfst, pageSize);
     uint32_t startOffset = getPageOffset(iOfst, pageSize);
     
-    CCVFS_DEBUG("Page-based read: pageSize=%u, startPage=%u, startOffset=%u", 
-               pageSize, startPage, startOffset);
+    CCVFS_DEBUG("Page-based read: pageSize=%u, startPage=%u, startOffset=%u, buffer_enabled=%d", 
+               pageSize, startPage, startOffset, p->write_buffer.enabled);
     
     // Allocate page buffer
     unsigned char *pageBuffer = sqlite3_malloc(pageSize);
@@ -501,23 +528,39 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
         CCVFS_DEBUG("Reading iteration: currentPage=%u, currentOffset=%u, bytesToRead=%u", 
                    currentPage, currentOffset, bytesToRead);
         
-        // Read page
-        rc = readPage(p, currentPage, pageBuffer, pageSize);
-        if (rc != SQLITE_OK) {
-            CCVFS_ERROR("Failed to read page %u: %d", currentPage, rc);
+        // 首先尝试从缓冲区读取页面
+        // First try to read page from buffer
+        rc = ccvfs_buffer_read(p, currentPage, pageBuffer, pageSize);
+        if (rc == SQLITE_OK) {
+            // Successfully read from buffer
+            CCVFS_DEBUG("Buffer hit for page %u during read", currentPage);
+        } else if (rc == SQLITE_NOTFOUND) {
+            // Not in buffer, read from disk
+            CCVFS_DEBUG("Buffer miss for page %u, reading from disk", currentPage);
+            rc = readPage(p, currentPage, pageBuffer, pageSize);
+            if (rc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to read page %u from disk: %d", currentPage, rc);
+                sqlite3_free(pageBuffer);
+                return rc;
+            }
+        } else {
+            // Error reading from buffer
+            CCVFS_ERROR("Error reading page %u from buffer: %d", currentPage, rc);
             sqlite3_free(pageBuffer);
             return rc;
         }
         
-        // Copy data from page buffer
+        // Copy data from page buffer to output buffer
         memcpy(buffer + bytesRead, pageBuffer + currentOffset, bytesToRead);
         bytesRead += bytesToRead;
         
-        CCVFS_DEBUG("Copied %u bytes, total read: %d/%d", bytesToRead, bytesRead, iAmt);
+        CCVFS_DEBUG("Copied %u bytes from page, total read: %d/%d", bytesToRead, bytesRead, iAmt);
     }
     
     sqlite3_free(pageBuffer);
     
+    CCVFS_DEBUG("Read complete: buffer_hits=%u, buffer_entries=%u", 
+               p->buffer_hit_count, p->write_buffer.entry_count);
     CCVFS_VERBOSE("Successfully read %d bytes from offset %lld", iAmt, iOfst);
     return SQLITE_OK;
 }
@@ -1112,10 +1155,10 @@ static void ccvfs_update_space_tracking(CCVFSFile *pFile) {
 
 /*
  * 将数据写入文件
- * 对于CCVFS文件：初始化文件头、使用基于页的写入、处理跨页写入
+ * 对于CCVFS文件：初始化文件头、使用基于页的写入、处理跨页写入、支持写入缓冲
  * 对于普通文件：直接传递给底层VFS
  * Write data to file
- * For CCVFS files: initialize header, use page-based writing, handle cross-page writes
+ * For CCVFS files: initialize header, use page-based writing, handle cross-page writes, support write buffering
  * For regular files: pass directly to underlying VFS
  */
 int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst) {
@@ -1126,24 +1169,16 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
     
     CCVFS_DEBUG("=== WRITING %d bytes at offset %lld to file: %s ===", iAmt, iOfst, p->filename ? p->filename : "unknown");
     
-    // 对新CCVFS文件的首次写入初始化CCVFS文件头
-    // Initialize CCVFS header for new CCVFS files on first write
-    if (p->is_ccvfs_file && !p->header_loaded && iOfst == 0) {
-        CCVFS_DEBUG("First write to new CCVFS file, initializing header");
-        rc = ccvfs_init_header(p, p->pOwner);
+    // 对新CCVFS文件的首次写入初始化CCVFS文件头和写入缓冲区
+    // Initialize CCVFS header and write buffer for new CCVFS files on first write
+    if (p->is_ccvfs_file && p->header_loaded && !p->write_buffer.enabled && p->pOwner) {
+        CCVFS_DEBUG("Initializing write buffer for CCVFS file");
+        rc = ccvfs_init_write_buffer(p);
         if (rc != SQLITE_OK) {
-            CCVFS_ERROR("Failed to initialize CCVFS header: %d", rc);
+            CCVFS_ERROR("Failed to initialize write buffer: %d", rc);
             return rc;
         }
-        
-        // 先保存文件头
-        // Save header first
-        rc = ccvfs_save_header(p);
-        if (rc != SQLITE_OK) {
-            CCVFS_ERROR("Failed to save CCVFS header: %d", rc);
-            return rc;
-        }
-        CCVFS_DEBUG("CCVFS header initialized and saved");
+        CCVFS_DEBUG("Write buffer initialized successfully");
     }
     
     // 如果不是CCVFS文件，直接写入底层文件
@@ -1153,8 +1188,8 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
         return p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
     }
     
-    // CCVFS文件 - 使用基于页的写入
-    // CCVFS file - use page-based writing
+    // CCVFS文件 - 使用基于页的写入，支持写入缓冲
+    // CCVFS file - use page-based writing with buffering support
     uint32_t pageSize = p->header.page_size;
     if (pageSize == 0) {
         CCVFS_ERROR("Invalid page size in header, using default");
@@ -1167,8 +1202,8 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
     
     CCVFS_DEBUG("Page-based write: pageSize=%u, startPage=%u, startOffset=%u", 
                pageSize, startPage, startOffset);
-    CCVFS_DEBUG("Current mapping state: total_pages=%u, index_dirty=%d", 
-               p->header.total_pages, p->index_dirty);
+    CCVFS_DEBUG("Current mapping state: total_pages=%u, index_dirty=%d, buffer_enabled=%d", 
+               p->header.total_pages, p->index_dirty, p->write_buffer.enabled);
     
     // Allocate page buffer
     unsigned char *pageBuffer = sqlite3_malloc(pageSize);
@@ -1193,12 +1228,24 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
         // If we're not writing a full page, read existing data first
         if (currentOffset != 0 || bytesToWrite != pageSize) {
             CCVFS_DEBUG("Partial page write, reading existing data");
-            rc = readPage(p, currentPage, pageBuffer, pageSize);
-            if (rc != SQLITE_OK) {
-                // 如果页不存在，用零填充
-                // If page doesn't exist, fill with zeros
-                CCVFS_DEBUG("Page doesn't exist, filling with zeros");
-                memset(pageBuffer, 0, pageSize);
+            
+            // First check buffer for existing data
+            rc = ccvfs_buffer_read(p, currentPage, pageBuffer, pageSize);
+            if (rc == SQLITE_NOTFOUND) {
+                // Not in buffer, try reading from disk
+                rc = readPage(p, currentPage, pageBuffer, pageSize);
+                if (rc != SQLITE_OK) {
+                    // 如果页不存在，用零填充
+                    // If page doesn't exist, fill with zeros
+                    CCVFS_DEBUG("Page doesn't exist, filling with zeros");
+                    memset(pageBuffer, 0, pageSize);
+                }
+            } else if (rc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to read from buffer for partial page write: %d", rc);
+                sqlite3_free(pageBuffer);
+                return rc;
+            } else {
+                CCVFS_DEBUG("Used buffered data for partial page write");
             }
         }
         
@@ -1206,15 +1253,26 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
         // Copy new data into page buffer
         memcpy(pageBuffer + currentOffset, data + bytesWritten, bytesToWrite);
         
-        CCVFS_DEBUG("Modified page buffer, writing page %u", currentPage);
+        CCVFS_DEBUG("Modified page buffer, attempting to buffer/write page %u", currentPage);
         
-        // 写入修改后的页
-        // Write modified page
-        rc = writePage(p, currentPage, pageBuffer, pageSize);
-        if (rc != SQLITE_OK) {
-            CCVFS_ERROR("Failed to write page %u: %d", currentPage, rc);
+        // 尝试将页面写入缓冲区，如果失败则直接写入磁盘
+        // Try to write page to buffer, if it fails write directly to disk
+        rc = ccvfs_buffer_write(p, currentPage, pageBuffer, pageSize);
+        if (rc == SQLITE_NOTFOUND) {
+            // Write buffering is disabled or not available, write directly
+            CCVFS_DEBUG("Write buffering not available, writing page %u directly to disk", currentPage);
+            rc = writePage(p, currentPage, pageBuffer, pageSize);
+            if (rc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to write page %u directly: %d", currentPage, rc);
+                sqlite3_free(pageBuffer);
+                return rc;
+            }
+        } else if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to buffer/write page %u: %d", currentPage, rc);
             sqlite3_free(pageBuffer);
             return rc;
+        } else {
+            CCVFS_DEBUG("Successfully buffered page %u", currentPage);
         }
         
         bytesWritten += bytesToWrite;
@@ -1224,8 +1282,8 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
     
     sqlite3_free(pageBuffer);
     
-    CCVFS_DEBUG("Write complete: index_dirty=%d, total_pages=%u", 
-               p->index_dirty, p->header.total_pages);
+    CCVFS_DEBUG("Write complete: index_dirty=%d, total_pages=%u, buffer_entries=%u", 
+               p->index_dirty, p->header.total_pages, p->write_buffer.entry_count);
     CCVFS_VERBOSE("Successfully wrote %d bytes to offset %lld", iAmt, iOfst);
     return SQLITE_OK;
 }
@@ -1273,17 +1331,28 @@ int ccvfsIoTruncate(sqlite3_file *pFile, sqlite3_int64 size) {
 
 /*
  * 将文件同步到磁盘
- * 先保存CCVFS的页索引和文件头，然后同步底层文件
+ * 先刷新写入缓冲区、保存CCVFS的页索引和文件头，然后同步底层文件
  * Sync file to disk
- * Save CCVFS page index and header first, then sync underlying file
+ * Flush write buffer first, save CCVFS page index and header, then sync underlying file
  */
 int ccvfsIoSync(sqlite3_file *pFile, int flags) {
     CCVFSFile *p = (CCVFSFile *)pFile;
     
     CCVFS_DEBUG("Syncing file with flags %d", flags);
     
-    // 如果是CCVFS文件，先保存页索引和文件头
-    // Save page index and header first if this is a CCVFS file
+    // 如果是CCVFS文件，先刷新写入缓冲区
+    // Flush write buffer first if this is a CCVFS file
+    if (p->is_ccvfs_file && p->write_buffer.enabled && p->write_buffer.entry_count > 0) {
+        CCVFS_DEBUG("Flushing %u buffered entries during sync", p->write_buffer.entry_count);
+        int rc = ccvfs_flush_write_buffer(p);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to flush write buffer during sync: %d", rc);
+            return rc;
+        }
+    }
+    
+    // 如果是CCVFS文件，保存页索引和文件头
+    // Save page index and header if this is a CCVFS file
     if (p->pPageIndex && p->header_loaded) {
         int rc = ccvfs_save_page_index(p);
         if (rc != SQLITE_OK) {
@@ -1321,6 +1390,13 @@ int ccvfsIoSync(sqlite3_file *pFile, int flags) {
             CCVFS_ERROR("Failed to sync underlying file: %d", rc);
             return rc;
         }
+    }
+    
+    // 输出同步统计信息
+    // Output sync statistics
+    if (p->is_ccvfs_file) {
+        CCVFS_DEBUG("Sync completed: buffer_flushes=%u, buffer_hits=%u, total_buffered_writes=%u", 
+                   p->buffer_flush_count, p->buffer_hit_count, p->total_buffered_writes);
     }
     
     CCVFS_VERBOSE("File synced successfully");
@@ -1552,6 +1628,433 @@ int ccvfsIoFetch(sqlite3_file *pFile, sqlite3_int64 iOfst, int iAmt, void **pp) 
 int ccvfsIoUnfetch(sqlite3_file *pFile, sqlite3_int64 iOfst, void *pPage) {
     CCVFS_DEBUG("Unfetch operation not supported for compressed VFS");
     return SQLITE_OK;
+}
+
+// ============================================================================
+// WRITE BUFFER MANAGEMENT IMPLEMENTATION
+// ============================================================================
+
+/*
+ * 初始化写入缓冲管理器
+ * Initialize write buffer manager with default configuration
+ */
+int ccvfs_init_write_buffer(CCVFSFile *pFile) {
+    CCVFSWriteBuffer *pBuffer = &pFile->write_buffer;
+    
+    CCVFS_DEBUG("Initializing write buffer for file: %s", pFile->filename ? pFile->filename : "unknown");
+    
+    // Initialize write buffer structure
+    memset(pBuffer, 0, sizeof(CCVFSWriteBuffer));
+    
+    // Set configuration from VFS settings
+    if (pFile->pOwner) {
+        pBuffer->enabled = pFile->pOwner->enable_write_buffer;
+        pBuffer->max_entries = pFile->pOwner->max_buffer_entries;
+        pBuffer->max_buffer_size = pFile->pOwner->max_buffer_size;
+        pBuffer->auto_flush_pages = pFile->pOwner->auto_flush_pages;
+    } else {
+        // Use defaults if no VFS owner
+        pBuffer->enabled = CCVFS_DEFAULT_BUFFER_ENABLED;
+        pBuffer->max_entries = CCVFS_DEFAULT_MAX_BUFFER_ENTRIES;
+        pBuffer->max_buffer_size = CCVFS_DEFAULT_MAX_BUFFER_SIZE;
+        pBuffer->auto_flush_pages = CCVFS_DEFAULT_AUTO_FLUSH_PAGES;
+    }
+    
+    // Validate configuration parameters
+    if (pBuffer->max_entries < CCVFS_MIN_BUFFER_ENTRIES) {
+        CCVFS_DEBUG("Adjusting max_entries from %u to minimum %u", 
+                   pBuffer->max_entries, CCVFS_MIN_BUFFER_ENTRIES);
+        pBuffer->max_entries = CCVFS_MIN_BUFFER_ENTRIES;
+    } else if (pBuffer->max_entries > CCVFS_MAX_BUFFER_ENTRIES) {
+        CCVFS_DEBUG("Adjusting max_entries from %u to maximum %u", 
+                   pBuffer->max_entries, CCVFS_MAX_BUFFER_ENTRIES);
+        pBuffer->max_entries = CCVFS_MAX_BUFFER_ENTRIES;
+    }
+    
+    if (pBuffer->max_buffer_size < CCVFS_MIN_BUFFER_SIZE) {
+        CCVFS_DEBUG("Adjusting max_buffer_size from %u to minimum %u", 
+                   pBuffer->max_buffer_size, CCVFS_MIN_BUFFER_SIZE);
+        pBuffer->max_buffer_size = CCVFS_MIN_BUFFER_SIZE;
+    } else if (pBuffer->max_buffer_size > CCVFS_MAX_BUFFER_SIZE) {
+        CCVFS_DEBUG("Adjusting max_buffer_size from %u to maximum %u", 
+                   pBuffer->max_buffer_size, CCVFS_MAX_BUFFER_SIZE);
+        pBuffer->max_buffer_size = CCVFS_MAX_BUFFER_SIZE;
+    }
+    
+    // Initialize buffer list
+    pBuffer->entries = NULL;
+    pBuffer->entry_count = 0;
+    pBuffer->buffer_size = 0;
+    pBuffer->last_flush_time = 0;
+    
+    // Initialize buffer statistics
+    pFile->buffer_hit_count = 0;
+    pFile->buffer_flush_count = 0;
+    pFile->buffer_merge_count = 0;
+    pFile->total_buffered_writes = 0;
+    
+    CCVFS_INFO("Write buffer initialized: enabled=%d, max_entries=%u, max_size=%u KB, auto_flush=%u", 
+              pBuffer->enabled, pBuffer->max_entries, pBuffer->max_buffer_size / 1024, pBuffer->auto_flush_pages);
+    
+    return SQLITE_OK;
+}
+
+/*
+ * 清理写入缓冲管理器
+ * Clean up write buffer manager and free all allocated memory
+ */
+void ccvfs_cleanup_write_buffer(CCVFSFile *pFile) {
+    CCVFSWriteBuffer *pBuffer = &pFile->write_buffer;
+    CCVFSBufferEntry *pEntry, *pNext;
+    
+    CCVFS_DEBUG("Cleaning up write buffer for file: %s", pFile->filename ? pFile->filename : "unknown");
+    
+    if (!pBuffer) {
+        return;
+    }
+    
+    // Flush any remaining buffered data before cleanup
+    if (pBuffer->enabled && pBuffer->entry_count > 0) {
+        CCVFS_DEBUG("Flushing %u buffered entries before cleanup", pBuffer->entry_count);
+        ccvfs_flush_write_buffer(pFile);
+    }
+    
+    // Free all entries in the buffer
+    pEntry = pBuffer->entries;
+    while (pEntry) {
+        pNext = pEntry->next;
+        if (pEntry->data) {
+            sqlite3_free(pEntry->data);
+        }
+        sqlite3_free(pEntry);
+        pEntry = pNext;
+    }
+    
+    // Report final statistics
+    if (1 || pBuffer->entry_count > 0 || pFile->total_buffered_writes > 0) {
+        CCVFS_INFO("Write buffer cleanup stats: entries=%u, hits=%u, flushes=%u, merges=%u, total_writes=%u",
+                  pBuffer->entry_count, pFile->buffer_hit_count, 
+                  pFile->buffer_flush_count, pFile->buffer_merge_count, pFile->total_buffered_writes);
+    }
+    
+    // Reset buffer structure
+    memset(pBuffer, 0, sizeof(CCVFSWriteBuffer));
+    
+    // Reset buffer statistics
+    pFile->buffer_hit_count = 0;
+    pFile->buffer_flush_count = 0;
+    pFile->buffer_merge_count = 0;
+    pFile->total_buffered_writes = 0;
+    
+    CCVFS_DEBUG("Write buffer cleanup completed");
+}
+
+/*
+ * 在缓冲区中查找指定页面的条目
+ * Find buffer entry for specified page number
+ */
+static CCVFSBufferEntry* ccvfs_find_buffer_entry(CCVFSFile *pFile, uint32_t pageNum) {
+    CCVFSWriteBuffer *pBuffer = &pFile->write_buffer;
+    CCVFSBufferEntry *pEntry;
+    
+    if (!pBuffer->enabled || pBuffer->entry_count == 0) {
+        return NULL;
+    }
+    
+    pEntry = pBuffer->entries;
+    while (pEntry) {
+        if (pEntry->page_number == pageNum) {
+            CCVFS_DEBUG("Found buffered entry for page %u", pageNum);
+            return pEntry;
+        }
+        pEntry = pEntry->next;
+    }
+    
+    return NULL;
+}
+
+/*
+ * 移除缓冲区中的指定条目
+ * Remove specified entry from buffer
+ */
+static int ccvfs_remove_buffer_entry(CCVFSFile *pFile, CCVFSBufferEntry *pTargetEntry) {
+    CCVFSWriteBuffer *pBuffer = &pFile->write_buffer;
+    CCVFSBufferEntry *pEntry, *pPrev;
+    
+    if (!pBuffer->enabled || !pTargetEntry) {
+        return SQLITE_OK;
+    }
+    
+    pEntry = pBuffer->entries;
+    pPrev = NULL;
+    
+    while (pEntry) {
+        if (pEntry == pTargetEntry) {
+            // Remove from list
+            if (pPrev) {
+                pPrev->next = pEntry->next;
+            } else {
+                pBuffer->entries = pEntry->next;
+            }
+            
+            // Update buffer statistics
+            pBuffer->entry_count--;
+            pBuffer->buffer_size -= pEntry->data_size;
+            
+            // Free memory
+            if (pEntry->data) {
+                sqlite3_free(pEntry->data);
+            }
+            sqlite3_free(pEntry);
+            
+            CCVFS_DEBUG("Removed buffer entry for page %u, remaining entries: %u", 
+                       pTargetEntry->page_number, pBuffer->entry_count);
+            return SQLITE_OK;
+        }
+        pPrev = pEntry;
+        pEntry = pEntry->next;
+    }
+    
+    CCVFS_ERROR("Buffer entry not found in list");
+    return SQLITE_ERROR;
+}
+
+/*
+ * 将页面写入缓冲区
+ * Write page data to buffer
+ */
+int ccvfs_buffer_write(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *data, uint32_t dataSize) {
+    CCVFSWriteBuffer *pBuffer = &pFile->write_buffer;
+    CCVFSBufferEntry *pEntry;
+    
+    CCVFS_DEBUG("Buffering write for page %u, size %u bytes", pageNum, dataSize);
+    
+    // Check if buffering is enabled
+    if (!pBuffer->enabled) {
+        CCVFS_DEBUG("Write buffering disabled, not buffering page %u", pageNum);
+        return SQLITE_NOTFOUND;  // Indicate caller should write directly
+    }
+    
+    // Check if we need to flush buffer before adding new entry
+    if (pBuffer->entry_count >= pBuffer->max_entries || 
+        (pBuffer->buffer_size + dataSize) > pBuffer->max_buffer_size) {
+        CCVFS_DEBUG("Buffer full (entries: %u/%u, size: %u/%u), flushing before new write", 
+                   pBuffer->entry_count, pBuffer->max_entries,
+                   pBuffer->buffer_size, pBuffer->max_buffer_size);
+        
+        int rc = ccvfs_flush_write_buffer(pFile);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to flush buffer before new write: %d", rc);
+            return rc;
+        }
+    }
+    
+    // Check if this page is already in buffer (update existing entry)
+    pEntry = ccvfs_find_buffer_entry(pFile, pageNum);
+    if (pEntry) {
+        CCVFS_DEBUG("Updating existing buffer entry for page %u", pageNum);
+        
+        // Update buffer size statistics
+        pBuffer->buffer_size -= pEntry->data_size;
+        pBuffer->buffer_size += dataSize;
+        
+        // Reallocate data if size changed
+        if (pEntry->data_size != dataSize) {
+            sqlite3_free(pEntry->data);
+            pEntry->data = sqlite3_malloc(dataSize);
+            if (!pEntry->data) {
+                CCVFS_ERROR("Failed to allocate memory for buffer entry update");
+                return SQLITE_NOMEM;
+            }
+        }
+        
+        // Copy new data
+        memcpy(pEntry->data, data, dataSize);
+        pEntry->data_size = dataSize;
+        pEntry->is_dirty = 1;
+        
+        pFile->buffer_merge_count++;
+        pFile->total_buffered_writes++;
+        
+        CCVFS_DEBUG("Updated buffer entry for page %u, merge count: %u", pageNum, pFile->buffer_merge_count);
+        return SQLITE_OK;
+    }
+    
+    // Create new buffer entry
+    pEntry = (CCVFSBufferEntry*)sqlite3_malloc(sizeof(CCVFSBufferEntry));
+    if (!pEntry) {
+        CCVFS_ERROR("Failed to allocate memory for new buffer entry");
+        return SQLITE_NOMEM;
+    }
+    
+    pEntry->data = sqlite3_malloc(dataSize);
+    if (!pEntry->data) {
+        CCVFS_ERROR("Failed to allocate memory for buffer entry data");
+        sqlite3_free(pEntry);
+        return SQLITE_NOMEM;
+    }
+    
+    // Initialize entry
+    pEntry->page_number = pageNum;
+    pEntry->data_size = dataSize;
+    pEntry->is_dirty = 1;
+    memcpy(pEntry->data, data, dataSize);
+    
+    // Add to front of list
+    pEntry->next = pBuffer->entries;
+    pBuffer->entries = pEntry;
+    
+    // Update buffer statistics
+    pBuffer->entry_count++;
+    pBuffer->buffer_size += dataSize;
+    pFile->total_buffered_writes++;
+    
+    CCVFS_DEBUG("Added new buffer entry for page %u, total entries: %u, buffer size: %u", 
+               pageNum, pBuffer->entry_count, pBuffer->buffer_size);
+    
+    // Check if we should auto-flush
+    if (pBuffer->auto_flush_pages > 0 && pBuffer->entry_count >= pBuffer->auto_flush_pages) {
+        CCVFS_DEBUG("Auto-flush triggered: %u >= %u pages", pBuffer->entry_count, pBuffer->auto_flush_pages);
+        int rc = ccvfs_flush_write_buffer(pFile);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Auto-flush failed: %d", rc);
+            return rc;
+        }
+    }
+    
+    return SQLITE_OK;
+}
+
+/*
+ * 从缓冲区读取页面数据
+ * Read page data from buffer if available
+ */
+int ccvfs_buffer_read(CCVFSFile *pFile, uint32_t pageNum, unsigned char *buffer, uint32_t bufferSize) {
+    CCVFSWriteBuffer *pWriteBuffer = &pFile->write_buffer;
+    CCVFSBufferEntry *pEntry;
+    
+    CCVFS_DEBUG("Checking buffer for page %u read", pageNum);
+    
+    // Check if buffering is enabled
+    if (!pWriteBuffer->enabled) {
+        return SQLITE_NOTFOUND;  // Indicate caller should read from disk
+    }
+    
+    // Look for the page in buffer
+    pEntry = ccvfs_find_buffer_entry(pFile, pageNum);
+    if (!pEntry) {
+        CCVFS_DEBUG("Page %u not found in buffer", pageNum);
+        return SQLITE_NOTFOUND;  // Indicate caller should read from disk
+    }
+    
+    // Check buffer size compatibility
+    if (pEntry->data_size > bufferSize) {
+        CCVFS_ERROR("Buffer entry size %u exceeds read buffer size %u", pEntry->data_size, bufferSize);
+        return SQLITE_ERROR;
+    }
+    
+    // Copy data from buffer
+    memcpy(buffer, pEntry->data, pEntry->data_size);
+    
+    // Zero-fill remaining space if needed
+    if (pEntry->data_size < bufferSize) {
+        memset(buffer + pEntry->data_size, 0, bufferSize - pEntry->data_size);
+    }
+    
+    pFile->buffer_hit_count++;
+    
+    CCVFS_DEBUG("Buffer hit for page %u, hit count: %u", pageNum, pFile->buffer_hit_count);
+    return SQLITE_OK;
+}
+
+/*
+ * 刷新指定页面的缓冲条目到磁盘
+ * Flush specific buffer entry to disk
+ */
+int ccvfs_flush_buffer_entry(CCVFSFile *pFile, uint32_t pageNum) {
+    CCVFSBufferEntry *pEntry;
+    int rc;
+    
+    CCVFS_DEBUG("Flushing buffer entry for page %u", pageNum);
+    
+    pEntry = ccvfs_find_buffer_entry(pFile, pageNum);
+    if (!pEntry) {
+        CCVFS_DEBUG("No buffer entry found for page %u", pageNum);
+        return SQLITE_OK;  // Nothing to flush
+    }
+    
+    if (!pEntry->is_dirty) {
+        CCVFS_DEBUG("Buffer entry for page %u is not dirty, skipping", pageNum);
+        return SQLITE_OK;
+    }
+    
+    // Write the page directly using the original writePage function
+    rc = writePage(pFile, pEntry->page_number, pEntry->data, pEntry->data_size);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to flush buffer entry for page %u: %d", pageNum, rc);
+        return rc;
+    }
+    
+    // Mark as clean but keep in buffer for potential reads
+    pEntry->is_dirty = 0;
+    
+    CCVFS_DEBUG("Successfully flushed buffer entry for page %u", pageNum);
+    return SQLITE_OK;
+}
+
+/*
+ * 刷新所有缓冲区条目到磁盘
+ * Flush all buffer entries to disk
+ */
+int ccvfs_flush_write_buffer(CCVFSFile *pFile) {
+    CCVFSWriteBuffer *pBuffer = &pFile->write_buffer;
+    CCVFSBufferEntry *pEntry;
+    int rc = SQLITE_OK;
+    int flushed_count = 0;
+    int error_count = 0;
+    
+    CCVFS_DEBUG("Flushing write buffer: %u entries", pBuffer->entry_count);
+    
+    if (!pBuffer->enabled || pBuffer->entry_count == 0) {
+        CCVFS_DEBUG("Buffer flush not needed: enabled=%d, entry_count=%u", 
+                   pBuffer->enabled, pBuffer->entry_count);
+        return SQLITE_OK;
+    }
+    
+    // Flush all dirty entries
+    pEntry = pBuffer->entries;
+    while (pEntry) {
+        if (pEntry->is_dirty) {
+            int flush_rc = writePage(pFile, pEntry->page_number, pEntry->data, pEntry->data_size);
+            if (flush_rc == SQLITE_OK) {
+                pEntry->is_dirty = 0;  // Mark as clean
+                flushed_count++;
+                CCVFS_DEBUG("Flushed buffered page %u", pEntry->page_number);
+            } else {
+                CCVFS_ERROR("Failed to flush buffered page %u: %d", pEntry->page_number, flush_rc);
+                error_count++;
+                if (rc == SQLITE_OK) {
+                    rc = flush_rc;  // Remember first error
+                }
+            }
+        }
+        pEntry = pEntry->next;
+    }
+    
+    // Update statistics
+    pFile->buffer_flush_count++;
+    pBuffer->last_flush_time = time(NULL);
+    
+    if (error_count > 0) {
+        CCVFS_ERROR("Buffer flush completed with errors: flushed=%d, errors=%d", flushed_count, error_count);
+    } else {
+        CCVFS_DEBUG("Buffer flush completed successfully: flushed=%d pages", flushed_count);
+    }
+    
+    // Optional: Clear buffer after successful flush (configurable behavior)
+    // For now, keep entries in buffer for potential reads
+    
+    return rc;
 }
 
 // ============================================================================

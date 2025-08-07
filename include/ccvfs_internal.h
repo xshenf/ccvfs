@@ -56,6 +56,13 @@ typedef struct CCVFS {
     int enable_hole_detection;  /* 启用空洞检测 Enable hole detection */
     uint32_t max_holes;         /* 最大跟踪空洞数 Maximum holes to track */
     uint32_t min_hole_size;     /* 最小跟踪空洞大小 Minimum hole size to track */
+    
+    // 写入缓冲配置
+    // Write buffer configuration
+    int enable_write_buffer;    /* 启用写入缓冲 Enable write buffering */
+    uint32_t max_buffer_entries; /* 最大缓冲条目数 Maximum buffer entries */
+    uint32_t max_buffer_size;   /* 最大缓冲区大小 Maximum buffer size in bytes */
+    uint32_t auto_flush_pages;  /* 自动刷新页数阈值 Auto flush page threshold */
 } CCVFS;
 
 /*
@@ -95,6 +102,14 @@ typedef struct CCVFSFile {
     uint32_t hole_merge_count;        /* Number of hole merge operations */
     uint32_t hole_cleanup_count;      /* Number of small holes removed */
     uint32_t hole_operations_count;   /* Counter for triggering maintenance */
+    
+    // 写入缓冲管理器和统计
+    // Write buffer manager and statistics
+    CCVFSWriteBuffer write_buffer;    /* Write buffering system */
+    uint32_t buffer_hit_count;        /* Number of buffer hits during reads */
+    uint32_t buffer_flush_count;      /* Number of buffer flushes performed */
+    uint32_t buffer_merge_count;      /* Number of write merges in buffer */
+    uint32_t total_buffered_writes;   /* Total writes that went through buffer */
     
     // 数据完整性统计和错误跟踪
     // Data integrity statistics and error tracking

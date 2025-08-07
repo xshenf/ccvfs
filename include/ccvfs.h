@@ -58,6 +58,16 @@ extern "C" {
 #define CCVFS_MIN_HOLE_SIZE         16      // Minimum allowed hole size
 #define CCVFS_MAX_HOLE_SIZE         4096    // Maximum allowed hole size
 
+// Write buffer configuration constants
+#define CCVFS_DEFAULT_BUFFER_ENABLED      1        // Enable write buffering by default
+#define CCVFS_DEFAULT_MAX_BUFFER_ENTRIES  32       // Default maximum buffered pages
+#define CCVFS_MIN_BUFFER_ENTRIES          4        // Minimum buffer entries
+#define CCVFS_MAX_BUFFER_ENTRIES          1024     // Maximum buffer entries
+#define CCVFS_DEFAULT_MAX_BUFFER_SIZE     (4*1024*1024) // 4MB default buffer size
+#define CCVFS_MIN_BUFFER_SIZE             (256*1024)    // 256KB minimum buffer
+#define CCVFS_MAX_BUFFER_SIZE             (64*1024*1024) // 64MB maximum buffer
+#define CCVFS_DEFAULT_AUTO_FLUSH_PAGES    16       // Auto flush every 16 pages
+
 /*
  * File header structure (128 bytes)
  */
@@ -146,6 +156,31 @@ typedef struct CCVFSHoleManager {
     uint32_t min_hole_size;         // Minimum hole size to track (最小跟踪空洞大小)
     int enabled;                    // Whether hole detection is enabled (是否启用空洞检测)
 } CCVFSHoleManager;
+
+/*
+ * Buffered write entry for batch operations - 批量操作的缓冲写入项
+ */
+typedef struct CCVFSBufferEntry {
+    uint32_t page_number;           // Page number to write (要写入的页编号)
+    unsigned char *data;            // Page data (页数据)
+    uint32_t data_size;            // Size of page data (页数据大小)
+    int is_dirty;                  // Whether this entry needs to be written (此条目是否需要写入)
+    struct CCVFSBufferEntry *next; // Next entry in buffer list (缓冲区列表中的下一项)
+} CCVFSBufferEntry;
+
+/*
+ * Write buffer manager for batch write operations - 批量写入操作的写入缓冲区管理器
+ */
+typedef struct CCVFSWriteBuffer {
+    CCVFSBufferEntry *entries;      // Linked list of buffered entries (缓冲条目链表)
+    uint32_t entry_count;           // Number of buffered entries (缓冲条目数量)
+    uint32_t max_entries;           // Maximum entries to buffer (最大缓冲条目数)
+    uint32_t buffer_size;           // Current buffer memory usage (当前缓冲区内存使用量)
+    uint32_t max_buffer_size;       // Maximum buffer size in bytes (最大缓冲区大小，字节)
+    int enabled;                    // Whether write buffering is enabled (是否启用写入缓冲)
+    int auto_flush_pages;           // Auto flush when this many pages buffered (缓冲这么多页时自动刷新)
+    sqlite3_int64 last_flush_time;  // Last flush timestamp (上次刷新时间戳)
+} CCVFSWriteBuffer;
 
 /*
  * Compression algorithm interface
@@ -259,6 +294,56 @@ typedef struct {
 } CCVFSStats;
 
 int sqlite3_ccvfs_get_stats(const char *compressed_db, CCVFSStats *stats);
+
+/*
+ * Configure write buffer settings for a VFS
+ * Parameters:
+ *   zVfsName - Name of the VFS to configure
+ *   enabled - Whether to enable write buffering (0 or 1)
+ *   max_entries - Maximum number of pages to buffer (0 for default)
+ *   max_buffer_size - Maximum buffer size in bytes (0 for default)
+ *   auto_flush_pages - Auto flush threshold in pages (0 for default)
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_configure_write_buffer(
+    const char *zVfsName,
+    int enabled,
+    uint32_t max_entries,
+    uint32_t max_buffer_size,
+    uint32_t auto_flush_pages
+);
+
+/*
+ * Get write buffer statistics for an open database
+ * Parameters:
+ *   db - Open database connection
+ *   buffer_hits - Buffer hit count (output)
+ *   buffer_flushes - Buffer flush count (output)
+ *   buffer_merges - Buffer merge count (output)
+ *   total_buffered_writes - Total buffered writes count (output)
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_get_buffer_stats(
+    sqlite3 *db,
+    uint32_t *buffer_hits,
+    uint32_t *buffer_flushes,
+    uint32_t *buffer_merges,
+    uint32_t *total_buffered_writes
+);
+
+/*
+ * Force flush write buffer for an open database
+ * Parameters:
+ *   db - Open database connection
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_flush_write_buffer(sqlite3 *db);
 
 /*
  * Convenience macro for backward compatibility
