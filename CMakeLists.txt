@@ -61,6 +61,7 @@ set(CCVFS_SRC
     src/ccvfs_algorithm.c
         src/ccvfs_page.c
     src/ccvfs_utils.c
+    src/ccvfs_batch_writer.c
     src/db_compress_tool.c
 )
 
@@ -132,6 +133,18 @@ target_link_libraries(batch_write_buffer_test sqlitecc)
 add_executable(simple_buffer_test test/simple_buffer_test.c)
 target_link_libraries(simple_buffer_test sqlitecc)
 
+# 改进的批量写入器测试程序
+add_executable(improved_batch_writer_test test/improved_batch_writer_test.c)
+target_link_libraries(improved_batch_writer_test sqlitecc)
+
+# 缓冲功能验证测试程序
+add_executable(buffer_functionality_test test/buffer_functionality_test.c)
+target_link_libraries(buffer_functionality_test sqlitecc)
+
+# 简化缓冲验证测试程序
+add_executable(simple_buffer_verification test/simple_buffer_verification.c)
+target_link_libraries(simple_buffer_verification sqlitecc)
+
 # 链接数学库（某些平台需要）
 if(UNIX AND NOT APPLE)
     target_link_libraries(shell m)
@@ -142,4 +155,7 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(test_hole_detection m)
     target_link_libraries(simple_hole_test m)
     target_link_libraries(batch_write_buffer_test m)
+    target_link_libraries(improved_batch_writer_test m)
+    target_link_libraries(buffer_functionality_test m)
+    target_link_libraries(simple_buffer_verification m)
 endif()

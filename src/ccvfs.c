@@ -1,5 +1,7 @@
 #include "ccvfs_core.h"
 #include "ccvfs_algorithm.h"
+#include "ccvfs_io.h"
+#include "ccvfs_batch_writer.h"
 
 // ============================================================================
 // PUBLIC API IMPLEMENTATION
@@ -367,4 +369,137 @@ int sqlite3_activate_ccvfs(const char *zCompressType, const char *zEncryptType) 
         CCVFS_ERROR("Cannot find the newly created CCVFS");
         return SQLITE_ERROR;
     }
+}/*
+
+ * Configure batch writer for a VFS
+ */
+int sqlite3_ccvfs_configure_batch_writer(const char *zVfsName,
+                                         int enabled,
+                                         uint32_t max_pages,
+                                         uint32_t max_memory_mb,
+                                         uint32_t auto_flush_threshold) {
+    sqlite3_vfs *pVfs;
+    CCVFS *pCcvfs;
+    
+    CCVFS_DEBUG("Configuring batch writer for VFS: %s", zVfsName);
+    
+    if (!zVfsName) {
+        CCVFS_ERROR("VFS name cannot be NULL");
+        return SQLITE_MISUSE;
+    }
+    
+    pVfs = sqlite3_vfs_find(zVfsName);
+    if (!pVfs) {
+        CCVFS_ERROR("VFS not found: %s", zVfsName);
+        return SQLITE_ERROR;
+    }
+    
+    pCcvfs = (CCVFS*)pVfs;
+    
+    // Update VFS-level configuration
+    pCcvfs->enable_write_buffer = enabled;
+    if (max_pages > 0) {
+        pCcvfs->write_buffer_max_entries = max_pages;
+    }
+    if (auto_flush_threshold > 0) {
+        pCcvfs->write_buffer_auto_flush_pages = auto_flush_threshold;
+    }
+    
+    CCVFS_INFO("Batch writer configured for VFS %s: enabled=%d, max_pages=%u, max_memory=%uMB, auto_flush=%u",
+               zVfsName, enabled, max_pages, max_memory_mb, auto_flush_threshold);
+    
+    return SQLITE_OK;
+}
+
+/*
+ * Get batch writer statistics for an open database
+ */
+int sqlite3_ccvfs_get_batch_writer_stats(sqlite3 *db,
+                                         uint32_t *hits,
+                                         uint32_t *flushes,
+                                         uint32_t *merges,
+                                         uint32_t *total_writes,
+                                         uint32_t *memory_used,
+                                         uint32_t *page_count) {
+    sqlite3_file *pFile;
+    CCVFSFile *pCcvfsFile;
+    int rc;
+    
+    if (!db) {
+        CCVFS_ERROR("Database connection cannot be NULL");
+        return SQLITE_MISUSE;
+    }
+    
+    rc = sqlite3_file_control(db, NULL, SQLITE_FCNTL_FILE_POINTER, &pFile);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to get file pointer: %d", rc);
+        return rc;
+    }
+    
+    if (!pFile || pFile->pMethods != &ccvfsIoMethods) {
+        CCVFS_ERROR("Not a CCVFS file");
+        return SQLITE_MISUSE;
+    }
+    
+    pCcvfsFile = (CCVFSFile*)pFile;
+    
+    if (!pCcvfsFile->is_ccvfs_file) {
+        CCVFS_DEBUG("File is not in CCVFS format, returning zero stats");
+        if (hits) *hits = 0;
+        if (flushes) *flushes = 0;
+        if (merges) *merges = 0;
+        if (total_writes) *total_writes = 0;
+        if (memory_used) *memory_used = 0;
+        if (page_count) *page_count = 0;
+        return SQLITE_OK;
+    }
+    
+    return ccvfs_get_batch_writer_stats(pCcvfsFile, hits, flushes, merges, 
+                                       total_writes, memory_used, page_count);
+}
+
+/*
+ * Force flush batch writer for an open database
+ */
+int sqlite3_ccvfs_flush_batch_writer(sqlite3 *db) {
+    sqlite3_file *pFile;
+    CCVFSFile *pCcvfsFile;
+    int rc;
+    
+    if (!db) {
+        CCVFS_ERROR("Database connection cannot be NULL");
+        return SQLITE_MISUSE;
+    }
+    
+    rc = sqlite3_file_control(db, NULL, SQLITE_FCNTL_FILE_POINTER, &pFile);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("Failed to get file pointer: %d", rc);
+        return rc;
+    }
+    
+    if (!pFile || pFile->pMethods != &ccvfsIoMethods) {
+        CCVFS_ERROR("Not a CCVFS file");
+        return SQLITE_MISUSE;
+    }
+    
+    pCcvfsFile = (CCVFSFile*)pFile;
+    
+    if (!pCcvfsFile->is_ccvfs_file) {
+        CCVFS_DEBUG("File is not in CCVFS format, nothing to flush");
+        return SQLITE_OK;
+    }
+    
+    if (pCcvfsFile->batch_writer && pCcvfsFile->batch_writer->enabled && pCcvfsFile->batch_writer->page_count > 0) {
+        CCVFS_DEBUG("Force flushing %u batch writer pages", pCcvfsFile->batch_writer->page_count);
+        rc = ccvfs_flush_batch_writer(pCcvfsFile);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to flush batch writer: %d", rc);
+            return rc;
+        }
+        CCVFS_INFO("Batch writer flushed successfully");
+    } else {
+        CCVFS_DEBUG("No batch writer data to flush");
+    }
+    
+    return SQLITE_OK;
 }

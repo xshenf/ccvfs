@@ -346,6 +346,60 @@ int sqlite3_ccvfs_get_buffer_stats(
 int sqlite3_ccvfs_flush_write_buffer(sqlite3 *db);
 
 /*
+ * Configure batch writer for a VFS
+ * Parameters:
+ *   zVfsName - Name of the VFS to configure
+ *   enabled - Whether to enable batch writing (0 or 1)
+ *   max_pages - Maximum number of pages to buffer (0 for default)
+ *   max_memory_mb - Maximum memory usage in MB (0 for default)
+ *   auto_flush_threshold - Auto flush threshold in pages (0 for default)
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_configure_batch_writer(
+    const char *zVfsName,
+    int enabled,
+    uint32_t max_pages,
+    uint32_t max_memory_mb,
+    uint32_t auto_flush_threshold
+);
+
+/*
+ * Get batch writer statistics for an open database
+ * Parameters:
+ *   db - Open database connection
+ *   hits - Batch writer hit count (output)
+ *   flushes - Batch writer flush count (output)
+ *   merges - Batch writer merge count (output)
+ *   total_writes - Total batch writes count (output)
+ *   memory_used - Current memory usage in bytes (output)
+ *   page_count - Current buffered page count (output)
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_get_batch_writer_stats(
+    sqlite3 *db,
+    uint32_t *hits,
+    uint32_t *flushes,
+    uint32_t *merges,
+    uint32_t *total_writes,
+    uint32_t *memory_used,
+    uint32_t *page_count
+);
+
+/*
+ * Force flush batch writer for an open database
+ * Parameters:
+ *   db - Open database connection
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_flush_batch_writer(sqlite3 *db);
+
+/*
  * Convenience macro for backward compatibility
  * Creates VFS with default 64KB page size
  */

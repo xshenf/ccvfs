@@ -19,10 +19,17 @@
  * Initialize batch writer with configuration
  */
 int ccvfs_init_batch_writer(CCVFSFile *pFile) {
-    CCVFSBatchWriter *pWriter = &pFile->batch_writer;
-    
     CCVFS_DEBUG("Initializing batch writer for file: %s", 
                pFile->filename ? pFile->filename : "unknown");
+    
+    // Allocate batch writer structure
+    pFile->batch_writer = (CCVFSBatchWriter*)sqlite3_malloc(sizeof(CCVFSBatchWriter));
+    if (!pFile->batch_writer) {
+        CCVFS_ERROR("Failed to allocate batch writer structure");
+        return SQLITE_NOMEM;
+    }
+    
+    CCVFSBatchWriter *pWriter = pFile->batch_writer;
     
     // Clear the structure
     memset(pWriter, 0, sizeof(CCVFSBatchWriter));
@@ -56,9 +63,15 @@ int ccvfs_init_batch_writer(CCVFSFile *pFile) {
  * Cleanup batch writer and free resources
  */
 void ccvfs_cleanup_batch_writer(CCVFSFile *pFile) {
-    CCVFSBatchWriter *pWriter = &pFile->batch_writer;
+    if (!pFile->batch_writer) {
+        return;
+    }
+    
+    CCVFSBatchWriter *pWriter = pFile->batch_writer;
     
     if (!pWriter->enabled) {
+        sqlite3_free(pFile->batch_writer);
+        pFile->batch_writer = NULL;
         return;
     }
     
@@ -77,8 +90,9 @@ void ccvfs_cleanup_batch_writer(CCVFSFile *pFile) {
     CCVFS_INFO("Batch writer cleanup stats: hits=%u, flushes=%u, merges=%u, total_writes=%u",
                pWriter->hits, pWriter->flushes, pWriter->merges, pWriter->total_writes);
     
-    // Clear the structure
-    memset(pWriter, 0, sizeof(CCVFSBatchWriter));
+    // Free the batch writer structure
+    sqlite3_free(pFile->batch_writer);
+    pFile->batch_writer = NULL;
 }
 
 /*
@@ -86,7 +100,10 @@ void ccvfs_cleanup_batch_writer(CCVFSFile *pFile) {
  */
 int ccvfs_batch_write_page(CCVFSFile *pFile, uint32_t pageNum, 
                           const unsigned char *data, uint32_t dataSize) {
-    CCVFSBatchWriter *pWriter = &pFile->batch_writer;
+    if (!pFile->batch_writer) {
+        return SQLITE_NOTFOUND;
+    }
+    CCVFSBatchWriter *pWriter = pFile->batch_writer;
     
     CCVFS_DEBUG("Batch writing page %u, size %u bytes", pageNum, dataSize);
     
@@ -159,7 +176,10 @@ int ccvfs_batch_write_page(CCVFSFile *pFile, uint32_t pageNum,
  */
 int ccvfs_batch_read_page(CCVFSFile *pFile, uint32_t pageNum, 
                          unsigned char *buffer, uint32_t bufferSize) {
-    CCVFSBatchWriter *pWriter = &pFile->batch_writer;
+    if (!pFile->batch_writer) {
+        return SQLITE_NOTFOUND;
+    }
+    CCVFSBatchWriter *pWriter = pFile->batch_writer;
     
     CCVFS_DEBUG("Checking batch writer for page %u read", pageNum);
     
@@ -204,7 +224,10 @@ int ccvfs_batch_read_page(CCVFSFile *pFile, uint32_t pageNum,
  * Flush all pages in batch writer to disk
  */
 int ccvfs_flush_batch_writer(CCVFSFile *pFile) {
-    CCVFSBatchWriter *pWriter = &pFile->batch_writer;
+    if (!pFile->batch_writer) {
+        return SQLITE_OK;
+    }
+    CCVFSBatchWriter *pWriter = pFile->batch_writer;
     int rc = SQLITE_OK;
     
     CCVFS_DEBUG("Flushing batch writer: %u pages", pWriter->page_count);
@@ -555,8 +578,9 @@ void ccvfs_clear_batch_writer(CCVFSBatchWriter *pWriter) {
     pWriter->total_memory_used = 0;
     
     CCVFS_DEBUG("Cleared all pages from batch writer");
-}// ==
-==========================================================================
+}
+
+// ============================================================================
 // BATCH SPACE ALLOCATION FUNCTIONS
 // ============================================================================
 
@@ -849,7 +873,16 @@ int ccvfs_get_batch_writer_stats(CCVFSFile *pFile,
                                 uint32_t *total_writes,
                                 uint32_t *memory_used,
                                 uint32_t *page_count) {
-    CCVFSBatchWriter *pWriter = &pFile->batch_writer;
+    if (!pFile->batch_writer) {
+        if (hits) *hits = 0;
+        if (flushes) *flushes = 0;
+        if (merges) *merges = 0;
+        if (total_writes) *total_writes = 0;
+        if (memory_used) *memory_used = 0;
+        if (page_count) *page_count = 0;
+        return SQLITE_OK;
+    }
+    CCVFSBatchWriter *pWriter = pFile->batch_writer;
     
     if (hits) *hits = pWriter->hits;
     if (flushes) *flushes = pWriter->flushes;
@@ -869,7 +902,10 @@ int ccvfs_configure_batch_writer(CCVFSFile *pFile,
                                 uint32_t max_pages,
                                 uint32_t max_memory_mb,
                                 uint32_t auto_flush_threshold) {
-    CCVFSBatchWriter *pWriter = &pFile->batch_writer;
+    if (!pFile->batch_writer) {
+        return SQLITE_MISUSE;
+    }
+    CCVFSBatchWriter *pWriter = pFile->batch_writer;
     
     CCVFS_DEBUG("Configuring batch writer: enabled=%d, max_pages=%u, max_memory=%uMB, auto_flush=%u",
                enabled, max_pages, max_memory_mb, auto_flush_threshold);

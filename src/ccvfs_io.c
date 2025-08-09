@@ -2,6 +2,7 @@
 #include "ccvfs_page.h"
 #include "ccvfs_core.h"
 #include "ccvfs_utils.h"
+#include "ccvfs_batch_writer.h"
 #include <string.h>
 
 // Forward declarations
@@ -130,8 +131,19 @@ int ccvfsIoClose(sqlite3_file *pFile) {
     CCVFS_DEBUG("Closing CCVFS file");
     
     if (p->pReal) {
-        // 刷新写入缓冲区（如果启用）
-        // Flush write buffer if enabled
+        // 刷新批量写入器（如果启用）
+        // Flush batch writer if enabled
+        if (p->is_ccvfs_file && p->batch_writer && p->batch_writer->enabled && p->batch_writer->page_count > 0) {
+            CCVFS_DEBUG("Flushing %u batch writer pages before close", p->batch_writer->page_count);
+            int flushRc = ccvfs_flush_batch_writer(p);
+            if (flushRc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to flush batch writer during close: %d", flushRc);
+                rc = flushRc;
+            }
+        }
+        
+        // 刷新写入缓冲区（如果启用）- 保持向后兼容
+        // Flush write buffer if enabled - backward compatibility
         if (p->is_ccvfs_file && p->write_buffer.enabled && p->write_buffer.entry_count > 0) {
             CCVFS_DEBUG("Flushing %u buffered entries before close", p->write_buffer.entry_count);
             int flushRc = ccvfs_flush_write_buffer(p);
@@ -174,8 +186,14 @@ int ccvfsIoClose(sqlite3_file *pFile) {
         p->pPageIndex = NULL;
     }
 
-    // 清理写入缓冲区
-    // Clean up write buffer
+    // 清理批量写入器
+    // Clean up batch writer
+    if (p->is_ccvfs_file) {
+        ccvfs_cleanup_batch_writer(p);
+    }
+
+    // 清理写入缓冲区 - 保持向后兼容
+    // Clean up write buffer - backward compatibility
     if (p->is_ccvfs_file) {
         ccvfs_cleanup_write_buffer(p);
     }
@@ -528,24 +546,34 @@ int ccvfsIoRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst) 
         CCVFS_DEBUG("Reading iteration: currentPage=%u, currentOffset=%u, bytesToRead=%u", 
                    currentPage, currentOffset, bytesToRead);
         
-        // 首先尝试从缓冲区读取页面
-        // First try to read page from buffer
-        rc = ccvfs_buffer_read(p, currentPage, pageBuffer, pageSize);
+        // 首先尝试从批量写入器读取页面
+        // First try to read page from batch writer
+        rc = ccvfs_batch_read_page(p, currentPage, pageBuffer, pageSize);
         if (rc == SQLITE_OK) {
-            // Successfully read from buffer
-            CCVFS_DEBUG("Buffer hit for page %u during read", currentPage);
+            // Successfully read from batch writer
+            CCVFS_DEBUG("Batch writer hit for page %u during read", currentPage);
         } else if (rc == SQLITE_NOTFOUND) {
-            // Not in buffer, read from disk
-            CCVFS_DEBUG("Buffer miss for page %u, reading from disk", currentPage);
-            rc = readPage(p, currentPage, pageBuffer, pageSize);
-            if (rc != SQLITE_OK) {
-                CCVFS_ERROR("Failed to read page %u from disk: %d", currentPage, rc);
+            // 不在批量写入器中，尝试传统缓冲区
+            // Not in batch writer, try legacy buffer
+            rc = ccvfs_buffer_read(p, currentPage, pageBuffer, pageSize);
+            if (rc == SQLITE_OK) {
+                // Successfully read from legacy buffer
+                CCVFS_DEBUG("Legacy buffer hit for page %u during read", currentPage);
+                rc = readPage(p, currentPage, pageBuffer, pageSize);
+                if (rc != SQLITE_OK) {
+                    CCVFS_ERROR("Failed to read page %u from disk: %d", currentPage, rc);
+                    sqlite3_free(pageBuffer);
+                    return rc;
+                }
+            } else {
+                // Error reading from legacy buffer
+                CCVFS_ERROR("Error reading page %u from legacy buffer: %d", currentPage, rc);
                 sqlite3_free(pageBuffer);
                 return rc;
             }
         } else {
-            // Error reading from buffer
-            CCVFS_ERROR("Error reading page %u from buffer: %d", currentPage, rc);
+            // Error reading from batch writer
+            CCVFS_ERROR("Error reading page %u from batch writer: %d", currentPage, rc);
             sqlite3_free(pageBuffer);
             return rc;
         }
@@ -1255,24 +1283,31 @@ int ccvfsIoWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 
         
         CCVFS_DEBUG("Modified page buffer, attempting to buffer/write page %u", currentPage);
         
-        // 尝试将页面写入缓冲区，如果失败则直接写入磁盘
-        // Try to write page to buffer, if it fails write directly to disk
-        rc = ccvfs_buffer_write(p, currentPage, pageBuffer, pageSize);
+        // 首先尝试新的批量写入器
+        // First try the new batch writer
+        rc = ccvfs_batch_write_page(p, currentPage, pageBuffer, pageSize);
         if (rc == SQLITE_NOTFOUND) {
-            // Write buffering is disabled or not available, write directly
-            CCVFS_DEBUG("Write buffering not available, writing page %u directly to disk", currentPage);
-            rc = writePage(p, currentPage, pageBuffer, pageSize);
-            if (rc != SQLITE_OK) {
-                CCVFS_ERROR("Failed to write page %u directly: %d", currentPage, rc);
+            // 批量写入器不可用，尝试传统缓冲区
+            // Batch writer not available, try legacy buffer
+            rc = ccvfs_buffer_write(p, currentPage, pageBuffer, pageSize);
+            if (rc == SQLITE_NOTFOUND) {
+                // Write buffering is disabled or not available, write directly
+                CCVFS_DEBUG("Write buffering not available, writing page %u directly to disk", currentPage);
+                rc = writePage(p, currentPage, pageBuffer, pageSize);
+                if (rc != SQLITE_OK) {
+                    CCVFS_ERROR("Failed to write page %u directly: %d", currentPage, rc);
+                    sqlite3_free(pageBuffer);
+                    return rc;
+                }
+            } else if (rc != SQLITE_OK) {
+                CCVFS_ERROR("Failed to buffer/write page %u: %d", currentPage, rc);
                 sqlite3_free(pageBuffer);
                 return rc;
+            } else {
+                CCVFS_DEBUG("Successfully buffered page %u (legacy)", currentPage);
             }
-        } else if (rc != SQLITE_OK) {
-            CCVFS_ERROR("Failed to buffer/write page %u: %d", currentPage, rc);
-            sqlite3_free(pageBuffer);
-            return rc;
         } else {
-            CCVFS_DEBUG("Successfully buffered page %u", currentPage);
+            CCVFS_DEBUG("Successfully batch wrote page %u", currentPage);
         }
         
         bytesWritten += bytesToWrite;

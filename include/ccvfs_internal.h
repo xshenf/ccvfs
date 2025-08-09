@@ -12,6 +12,9 @@
 extern "C" {
 #endif
 
+// Forward declarations
+typedef struct CCVFSBatchWriter CCVFSBatchWriter;
+
 // Internal constants
 #define CCVFS_MAX_ALGORITHMS 16
 #define CCVFS_CRC32_POLYNOMIAL 0xEDB88320
@@ -63,6 +66,11 @@ typedef struct CCVFS {
     uint32_t max_buffer_entries; /* 最大缓冲条目数 Maximum buffer entries */
     uint32_t max_buffer_size;   /* 最大缓冲区大小 Maximum buffer size in bytes */
     uint32_t auto_flush_pages;  /* 自动刷新页数阈值 Auto flush page threshold */
+    
+    // 批量写入器配置
+    // Batch writer configuration
+    uint32_t write_buffer_max_entries;    /* 批量写入器最大条目数 */
+    uint32_t write_buffer_auto_flush_pages; /* 批量写入器自动刷新阈值 */
 } CCVFS;
 
 /*
@@ -105,11 +113,15 @@ typedef struct CCVFSFile {
     
     // 写入缓冲管理器和统计
     // Write buffer manager and statistics
-    CCVFSWriteBuffer write_buffer;    /* Write buffering system */
+    CCVFSWriteBuffer write_buffer;    /* Write buffering system (legacy) */
     uint32_t buffer_hit_count;        /* Number of buffer hits during reads */
     uint32_t buffer_flush_count;      /* Number of buffer flushes performed */
     uint32_t buffer_merge_count;      /* Number of write merges in buffer */
     uint32_t total_buffered_writes;   /* Total writes that went through buffer */
+    
+    // 改进的批量写入器
+    // Improved batch writer
+    CCVFSBatchWriter *batch_writer;    /* New batch writing system (pointer to avoid circular dependency) */
     
     // 数据完整性统计和错误跟踪
     // Data integrity statistics and error tracking

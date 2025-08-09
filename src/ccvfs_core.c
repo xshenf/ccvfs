@@ -2,6 +2,7 @@
 #include "ccvfs_io.h"
 #include "ccvfs_algorithm.h"
 #include "ccvfs_page.h"
+#include "ccvfs_batch_writer.h"
 
 /*
  * Open file
@@ -121,6 +122,17 @@ int ccvfsOpen(sqlite3_vfs *pVfs, sqlite3_filename zName, sqlite3_file *pFile,
             // Don't fail the open operation, just disable hole detection
             pCcvfsFile->hole_manager.enabled = 0;
             CCVFS_DEBUG("Hole detection disabled due to initialization failure");
+        }
+        
+        // Initialize batch writer for CCVFS files
+        rc = ccvfs_init_batch_writer(pCcvfsFile);
+        if (rc != SQLITE_OK) {
+            CCVFS_ERROR("Failed to initialize batch writer: %d", rc);
+            // Don't fail the open operation, just disable batch writing
+            if (pCcvfsFile->batch_writer) {
+                pCcvfsFile->batch_writer->enabled = 0;
+            }
+            CCVFS_DEBUG("Batch writer disabled due to initialization failure");
         }
     }
     
