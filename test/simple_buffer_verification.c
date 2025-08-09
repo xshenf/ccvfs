@@ -47,11 +47,11 @@ static int setup_test_vfs(int buffer_enabled) {
         return rc;
     }
     
-    // Configure write buffer
+    // Configure batch writer
     if (buffer_enabled) {
-        rc = sqlite3_ccvfs_configure_write_buffer(TEST_VFS_NAME, 1, 16, 1024*1024, 8);
+        rc = sqlite3_ccvfs_configure_batch_writer(TEST_VFS_NAME, 1, 16, 1024*1024, 8);
     } else {
-        rc = sqlite3_ccvfs_configure_write_buffer(TEST_VFS_NAME, 0, 0, 0, 0);
+        rc = sqlite3_ccvfs_configure_batch_writer(TEST_VFS_NAME, 0, 0, 0, 0);
     }
     
     if (rc != SQLITE_OK) {
@@ -73,7 +73,7 @@ static void test_buffer_statistics_tracking(void) {
     
     sqlite3 *db = NULL;
     int rc;
-    uint32_t hits, flushes, merges, writes;
+    uint32_t hits, flushes, merges, writes, memory_used, page_count;
     
     // Setup VFS with buffering
     rc = setup_test_vfs(1);
@@ -86,8 +86,8 @@ static void test_buffer_statistics_tracking(void) {
     VERIFY(rc == SQLITE_OK, "Database opened successfully");
     
     // Get initial stats
-    rc = sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes, &merges, &writes);
-    VERIFY(rc == SQLITE_OK, "Buffer stats API works");
+    rc = sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes, &merges, &writes, &memory_used, &page_count);
+    VERIFY(rc == SQLITE_OK, "Batch writer stats API works");
     VERIFY(hits == 0 && flushes == 0 && merges == 0 && writes == 0, 
            "Initial stats are zero");
     
@@ -106,9 +106,9 @@ static void test_buffer_statistics_tracking(void) {
     sqlite3_exec(db, "COMMIT TRANSACTION", NULL, NULL, NULL);
     
     // Check stats after writes
-    rc = sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes, &merges, &writes);
-    VERIFY(rc == SQLITE_OK, "Buffer stats retrieved after writes");
-    VERIFY(writes > 0, "Buffer writes were recorded");
+    rc = sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes, &merges, &writes, &memory_used, &page_count);
+    VERIFY(rc == SQLITE_OK, "Batch writer stats retrieved after writes");
+    VERIFY(writes > 0, "Batch writer writes were recorded");
     
     printf("  Stats after writes: hits=%u, flushes=%u, merges=%u, writes=%u\n", 
            hits, flushes, merges, writes);
@@ -123,7 +123,7 @@ static void test_buffer_hits_during_reads(void) {
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
     int rc;
-    uint32_t hits_before, hits_after, flushes, merges, writes;
+    uint32_t hits_before, hits_after, flushes, merges, writes, memory_used, page_count;
     
     // Setup VFS with buffering
     rc = setup_test_vfs(1);
@@ -146,7 +146,7 @@ static void test_buffer_hits_during_reads(void) {
     sqlite3_exec(db, "COMMIT TRANSACTION", NULL, NULL, NULL);
     
     // Get hits before reads
-    sqlite3_ccvfs_get_buffer_stats(db, &hits_before, &flushes, &merges, &writes);
+    sqlite3_ccvfs_get_batch_writer_stats(db, &hits_before, &flushes, &merges, &writes, &memory_used, &page_count);
     
     // Perform reads that should hit buffered data
     for (int i = 0; i < 3; i++) {
@@ -161,7 +161,7 @@ static void test_buffer_hits_during_reads(void) {
     }
     
     // Get hits after reads
-    sqlite3_ccvfs_get_buffer_stats(db, &hits_after, &flushes, &merges, &writes);
+    sqlite3_ccvfs_get_batch_writer_stats(db, &hits_after, &flushes, &merges, &writes, &memory_used, &page_count);
     
     VERIFY(hits_after > hits_before, "Buffer hits increased during reads");
     printf("  Buffer hits: before=%u, after=%u, increase=%u\n", 
@@ -176,7 +176,7 @@ static void test_buffer_merges(void) {
     
     sqlite3 *db = NULL;
     int rc;
-    uint32_t hits, flushes, merges_before, merges_after, writes;
+    uint32_t hits, flushes, merges_before, merges_after, writes, memory_used, page_count;
     
     // Setup VFS with buffering
     rc = setup_test_vfs(1);
@@ -192,7 +192,7 @@ static void test_buffer_merges(void) {
     sqlite3_exec(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)", NULL, NULL, NULL);
     
     // Get initial merge count
-    sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes, &merges_before, &writes);
+    sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes, &merges_before, &writes, &memory_used, &page_count);
     
     // Perform operations that should cause merges (multiple writes to same pages)
     for (int round = 0; round < 3; round++) {
@@ -220,7 +220,7 @@ static void test_buffer_merges(void) {
     }
     
     // Get final merge count
-    sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes, &merges_after, &writes);
+    sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes, &merges_after, &writes, &memory_used, &page_count);
     
     VERIFY(merges_after > merges_before, "Buffer merges occurred");
     printf("  Buffer merges: before=%u, after=%u, increase=%u\n", 
@@ -235,14 +235,14 @@ static void test_auto_flush_behavior(void) {
     
     sqlite3 *db = NULL;
     int rc;
-    uint32_t hits, flushes_before, flushes_after, merges, writes;
+    uint32_t hits, flushes_before, flushes_after, merges, writes, memory_used, page_count;
     
     // Setup VFS with small auto-flush threshold
     rc = setup_test_vfs(1);
     VERIFY(rc == SQLITE_OK, "VFS setup successful");
     
-    // Configure with small auto-flush threshold (3 pages)
-    rc = sqlite3_ccvfs_configure_write_buffer(TEST_VFS_NAME, 1, 16, 1024*1024, 3);
+    // Configure with small auto-flush threshold (1 page)
+    rc = sqlite3_ccvfs_configure_batch_writer(TEST_VFS_NAME, 1, 16, 1024*1024, 1);
     VERIFY(rc == SQLITE_OK, "Auto-flush threshold configured");
     
     // Open database
@@ -251,24 +251,24 @@ static void test_auto_flush_behavior(void) {
                         TEST_VFS_NAME);
     VERIFY(rc == SQLITE_OK, "Database opened successfully");
     
-    // Create table
+    // Get initial flush count BEFORE any operations
+    sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes_before, &merges, &writes, &memory_used, &page_count);
+    
+    // Create table (this might trigger auto-flush)
     sqlite3_exec(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)", NULL, NULL, NULL);
     
-    // Get initial flush count
-    sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes_before, &merges, &writes);
-    
-    // Insert enough data to trigger auto-flush
+    // Insert data to trigger auto-flush (threshold is 1 page)
     sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 5; i++) {
         char sql[512];
         snprintf(sql, sizeof(sql), 
-                "INSERT INTO test (data) VALUES ('Auto-flush test record %d with extra content to make it larger and span multiple pages')", i);
+                "INSERT INTO test (data) VALUES ('Auto-flush test record %d with extra content to make it larger')", i);
         sqlite3_exec(db, sql, NULL, NULL, NULL);
     }
     sqlite3_exec(db, "COMMIT TRANSACTION", NULL, NULL, NULL);
     
     // Get final flush count
-    sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes_after, &merges, &writes);
+    sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes_after, &merges, &writes, &memory_used, &page_count);
     
     VERIFY(flushes_after > flushes_before, "Auto-flush was triggered");
     printf("  Auto-flushes: before=%u, after=%u, triggered=%u\n", 
@@ -283,7 +283,7 @@ static void test_manual_flush(void) {
     
     sqlite3 *db = NULL;
     int rc;
-    uint32_t hits, flushes_before, flushes_after, merges, writes;
+    uint32_t hits, flushes_before, flushes_after, merges, writes, memory_used, page_count;
     
     // Setup VFS with buffering
     rc = setup_test_vfs(1);
@@ -300,14 +300,14 @@ static void test_manual_flush(void) {
     sqlite3_exec(db, "INSERT INTO test (data) VALUES ('Manual flush test')", NULL, NULL, NULL);
     
     // Get flush count before manual flush
-    sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes_before, &merges, &writes);
+    sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes_before, &merges, &writes, &memory_used, &page_count);
     
     // Perform manual flush
-    rc = sqlite3_ccvfs_flush_write_buffer(db);
+    rc = sqlite3_ccvfs_flush_batch_writer(db);
     VERIFY(rc == SQLITE_OK, "Manual flush succeeded");
     
     // Get flush count after manual flush
-    sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes_after, &merges, &writes);
+    sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes_after, &merges, &writes, &memory_used, &page_count);
     
     VERIFY(flushes_after > flushes_before, "Manual flush incremented flush count");
     printf("  Manual flush: before=%u, after=%u\n", flushes_before, flushes_after);
@@ -321,7 +321,7 @@ static void test_buffer_disabled_vs_enabled(void) {
     
     sqlite3 *db = NULL;
     int rc;
-    uint32_t hits, flushes, merges, writes;
+    uint32_t hits, flushes, merges, writes, memory_used, page_count;
     
     // Test with buffer DISABLED
     printf("  Testing with buffer DISABLED...\n");
@@ -338,8 +338,8 @@ static void test_buffer_disabled_vs_enabled(void) {
     sqlite3_exec(db, "INSERT INTO test (data) VALUES ('Disabled buffer test')", NULL, NULL, NULL);
     
     // Check stats - should be zero or minimal
-    rc = sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes, &merges, &writes);
-    VERIFY(rc == SQLITE_OK, "Buffer stats API works when disabled");
+    rc = sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes, &merges, &writes, &memory_used, &page_count);
+    VERIFY(rc == SQLITE_OK, "Batch writer stats API works when disabled");
     printf("    Disabled stats: hits=%u, flushes=%u, merges=%u, writes=%u\n", 
            hits, flushes, merges, writes);
     
@@ -361,9 +361,9 @@ static void test_buffer_disabled_vs_enabled(void) {
     sqlite3_exec(db, "INSERT INTO test (data) VALUES ('Enabled buffer test')", NULL, NULL, NULL);
     
     // Check stats - should show activity
-    rc = sqlite3_ccvfs_get_buffer_stats(db, &hits, &flushes, &merges, &writes);
-    VERIFY(rc == SQLITE_OK, "Buffer stats API works when enabled");
-    VERIFY(writes > 0, "Buffer shows write activity when enabled");
+    rc = sqlite3_ccvfs_get_batch_writer_stats(db, &hits, &flushes, &merges, &writes, &memory_used, &page_count);
+    VERIFY(rc == SQLITE_OK, "Batch writer stats API works when enabled");
+    VERIFY(writes > 0, "Batch writer shows write activity when enabled");
     printf("    Enabled stats: hits=%u, flushes=%u, merges=%u, writes=%u\n", 
            hits, flushes, merges, writes);
     

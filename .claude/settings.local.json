@@ -77,7 +77,8 @@
       "Bash(CCVFS_DEBUG=1 ./cmake-build-debug/batch_write_buffer_test.exe)",
       "Bash(./cmake-build-debug/batch_write_buffer_test.exe)",
       "Bash(./test_simple_buffer)",
-      "Bash(./debug_buffer_test:*)"
+      "Bash(./debug_buffer_test:*)",
+      "Bash(./improved_batch_writer_test.exe:*)"
     ],
     "deny": []
   }
