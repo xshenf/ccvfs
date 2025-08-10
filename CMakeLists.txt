@@ -159,3 +159,21 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(buffer_functionality_test m)
     target_link_libraries(simple_buffer_verification m)
 endif()
+
+# Enable testing
+enable_testing()
+
+# Add unit test subdirectory
+add_subdirectory(test/ut)
+
+# Print test information
+message(STATUS "Unit tests enabled. Use the following commands:")
+message(STATUS "  ctest                     # Run all tests")
+message(STATUS "  ctest -L unit             # Run only unit tests")
+message(STATUS "  ctest -R BasicTests       # Run basic tests (recommended first)")
+message(STATUS "  ctest -R CoreTests        # Run core tests")
+message(STATUS "  ctest -R CompressionTests # Run compression tests")
+message(STATUS "  ctest -R BatchWriterTests # Run batch writer tests")
+message(STATUS "  ctest -R IntegrationTests # Run integration tests")
+message(STATUS "  ctest -V                  # Verbose output")
+message(STATUS "  ctest --output-on-failure # Show output on failure")

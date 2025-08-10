@@ -1,0 +1,19 @@
+# Test output files
+*.db
+*.ccvfs
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Test temporary files
+test_*
+*_test.*
+recovery_*
+perf_*
+mixed_*
+fake.*
+integration_*
+
+# Build artifacts
+unit_tests
+unit_tests.exe
