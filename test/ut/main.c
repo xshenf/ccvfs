@@ -9,6 +9,10 @@ extern void register_ccvfs_core_tests(void);
 extern void register_compression_tests(void);
 extern void register_batch_writer_tests(void);
 extern void register_integration_tests(void);
+extern void register_algorithm_tests(void);
+extern void register_utils_tests(void);
+extern void register_page_tests(void);
+extern void register_db_tools_tests(void);
 
 // Function to print usage information
 void print_usage(const char *program_name) {
@@ -102,6 +106,10 @@ int main(int argc, char *argv[]) {
     register_compression_tests();
     register_batch_writer_tests();
     register_integration_tests();
+    register_algorithm_tests();
+    register_utils_tests();
+    register_page_tests();
+    register_db_tools_tests();
     
     printf(COLOR_GREEN "✅ All test suites registered" COLOR_RESET "\n");
     
@@ -119,10 +127,10 @@ int main(int argc, char *argv[]) {
         printf("================================\n");
         
         // Validate suite name
-        const char *valid_suites[] = {"Basic", "CCVFS_Core", "Compression", "Batch_Writer", "Integration"};
+        const char *valid_suites[] = {"Basic", "CCVFS_Core", "Compression", "Batch_Writer", "Integration", "Algorithm", "Utils", "Page", "DB_Tools"};
         int valid = 0;
         
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 9; i++) {
             if (strcmp(target_suite, valid_suites[i]) == 0) {
                 valid = 1;
                 break;

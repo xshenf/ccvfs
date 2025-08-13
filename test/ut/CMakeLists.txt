@@ -6,6 +6,10 @@ set(UT_SOURCES
     test_compression.c
     test_batch_writer.c
     test_integration.c
+    test_ccvfs_algorithm.c
+    test_ccvfs_utils.c
+    test_ccvfs_page.c
+    test_db_tools.c
     main.c
 )
 
