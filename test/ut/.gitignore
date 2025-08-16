@@ -6,8 +6,6 @@
 *.db-shm
 
 # Test temporary files
-test_*
-*_test.*
 recovery_*
 perf_*
 mixed_*
