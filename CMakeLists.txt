@@ -101,7 +101,7 @@ target_link_libraries(shell sqlitecc)
 target_compile_definitions(shell PRIVATE SQLITE_ENABLE_CEROD=1)
 
 # 数据库压缩解压工具
-add_executable(db_tool src/db_tool.c)
+add_executable(db_tool test/tool/db_tool.c test/tool/db_compare.c test/tool/db_generator.c)
 target_link_libraries(db_tool sqlitecc)
 
 # 数据库生成工具
