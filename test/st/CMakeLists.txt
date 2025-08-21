@@ -13,7 +13,11 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../sqlite3)
 # Build the unified system test executable
 add_executable(system_tests 
     system_test_main.c
-    system_test_impl.c
+    system_test_common.c
+    test_basic.c
+    test_storage.c
+    test_buffer.c
+    test_tools.c
 )
 
 # Link with the main sqlitecc library

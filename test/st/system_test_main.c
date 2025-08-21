@@ -6,38 +6,8 @@
  * test runner that can be controlled via command line arguments.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sqlite3.h>
-#include "ccvfs.h"
-#include "ccvfs_algorithm.h"
-
-// Test result structure
-typedef struct {
-    const char* name;
-    int passed;
-    int total;
-    char message[512];
-} TestResult;
-
-// Forward declarations for test functions
-int test_vfs_connection(TestResult* result);
-int test_simple_db(TestResult* result);
-int test_large_db_stress(TestResult* result);
-int test_simple_large(TestResult* result);
-int test_hole_detection(TestResult* result);
-int test_simple_hole(TestResult* result);
-int test_batch_write_buffer(TestResult* result);
-int test_simple_buffer(TestResult* result);
-int test_db_tools(TestResult* result);
-
-// Test registry
-typedef struct {
-    const char* name;
-    const char* description;
-    int (*test_func)(TestResult*);
-} TestCase;
+#include "system_test_common.h"
+#include "system_test_functions.h"
 
 static TestCase test_cases[] = {
     {"vfs_connection", "VFS connection and basic operations", test_vfs_connection},
@@ -95,7 +65,7 @@ int run_single_test(const char* test_name, int verbose) {
         printf("Test name: %s\n", test->name);
     }
     
-    int success = test->test_func(&result);
+    int success = test->function(&result);
     
     printf("Test result: %s - %d/%d passed", 
            success ? "PASS" : "FAIL", 
@@ -125,7 +95,7 @@ int run_all_tests(int verbose) {
             printf("    Test: %s\n", test_cases[i].name);
         }
         
-        int success = test_cases[i].test_func(&result);
+        int success = test_cases[i].function(&result);
         total_tests++;
         
         if (success) {
@@ -176,7 +146,7 @@ int main(int argc, char* argv[]) {
     }
     
     // Initialize built-in algorithms
-    ccvfs_init_builtin_algorithms();
+    init_test_algorithms();
     
     // Run tests
     if (run_all) {
