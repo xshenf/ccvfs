@@ -93,7 +93,7 @@ int test_vfs_connection(TestResult* result) {
 int test_simple_db(TestResult* result) {
     result->name = "Simple Database Test";
     result->passed = 0;
-    result->total = 4;
+    result->total = 5;  // Increased for enhanced data verification
     strcpy(result->message, "");
     
     cleanup_test_files("simple_test");
@@ -101,6 +101,14 @@ int test_simple_db(TestResult* result) {
     sqlite3 *db;
     int rc;
     char *err_msg = NULL;
+    
+    // Define test data for verification
+    const char* test_records[][2] = {
+        {"1", "Hello"},
+        {"2", "World"},
+        {"3", "SQLite"}
+    };
+    const int expected_count = 3;
     
     // Create test database
     rc = sqlite3_open("simple_test.db", &db);
@@ -124,12 +132,12 @@ int test_simple_db(TestResult* result) {
     }
     
     sqlite3_close(db);
-    result->passed++;
+    result->passed++; // Database creation and initial data insertion
     
     // Compress database
     rc = sqlite3_ccvfs_compress_database("simple_test.db", "simple_test.ccvfs", "zlib", NULL, 6);
     if (rc == SQLITE_OK) {
-        result->passed++;
+        result->passed++; // Compression successful
     } else {
         snprintf(result->message, sizeof(result->message), "Database compression failed: %d", rc);
         return 0;
@@ -138,13 +146,13 @@ int test_simple_db(TestResult* result) {
     // Decompress database
     rc = sqlite3_ccvfs_decompress_database("simple_test.ccvfs", "simple_test_restored.db");
     if (rc == SQLITE_OK) {
-        result->passed++;
+        result->passed++; // Decompression successful
     } else {
         snprintf(result->message, sizeof(result->message), "Database decompression failed: %d", rc);
         return 0;
     }
     
-    // Verify data
+    // Comprehensive data verification
     rc = sqlite3_open("simple_test_restored.db", &db);
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "Cannot open decompressed database: %s", sqlite3_errmsg(db));
@@ -152,27 +160,56 @@ int test_simple_db(TestResult* result) {
     }
     
     sqlite3_stmt *stmt;
-    rc = sqlite3_prepare_v2(db, "SELECT * FROM test ORDER BY id", -1, &stmt, NULL);
+    rc = sqlite3_prepare_v2(db, "SELECT id, name FROM test ORDER BY id", -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "SQL query error: %s", sqlite3_errmsg(db));
         sqlite3_close(db);
         return 0;
     }
+    result->passed++; // Query preparation successful
     
-    int count = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        count++;
+    // Verify each record's content
+    int verified_count = 0;
+    int data_integrity_ok = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW && data_integrity_ok) {
+        int id = sqlite3_column_int(stmt, 0);
+        const char* name = (const char*)sqlite3_column_text(stmt, 1);
+        
+        // Check if the record matches expected data
+        if (verified_count < expected_count) {
+            int expected_id = atoi(test_records[verified_count][0]);
+            const char* expected_name = test_records[verified_count][1];
+            
+            if (id != expected_id || strcmp(name, expected_name) != 0) {
+                snprintf(result->message, sizeof(result->message), 
+                        "Data integrity error: record %d, expected id=%d name='%s', got id=%d name='%s'", 
+                        verified_count + 1, expected_id, expected_name, id, name);
+                data_integrity_ok = 0;
+                break;
+            }
+        } else {
+            snprintf(result->message, sizeof(result->message), 
+                    "Unexpected extra record found: id=%d name='%s'", id, name);
+            data_integrity_ok = 0;
+            break;
+        }
+        verified_count++;
     }
     
     sqlite3_finalize(stmt);
     sqlite3_close(db);
     
-    if (count == 3) {
-        result->passed++;
-        snprintf(result->message, sizeof(result->message), "All %d records verified", count);
+    if (data_integrity_ok && verified_count == expected_count) {
+        result->passed++; // Data integrity verification passed
+        snprintf(result->message, sizeof(result->message), 
+                "Simple DB test passed: %d records verified with correct content", verified_count);
         return 1;
+    } else if (data_integrity_ok) {
+        snprintf(result->message, sizeof(result->message), 
+                "Record count mismatch: expected %d, verified %d", expected_count, verified_count);
+        return 0;
     } else {
-        snprintf(result->message, sizeof(result->message), "Expected 3 records, got %d", count);
+        // Error message already set in the loop
         return 0;
     }
 }

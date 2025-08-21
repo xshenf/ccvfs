@@ -10,7 +10,7 @@
 int test_hole_detection(TestResult* result) {
     result->name = "Hole Detection Test";
     result->passed = 0;
-    result->total = 6;
+    result->total = 8;  // Increased for comprehensive data verification
     strcpy(result->message, "");
     
     cleanup_test_files("test_holes");
@@ -46,10 +46,11 @@ int test_hole_detection(TestResult* result) {
     }
     result->passed++;
     
-    // Insert data to create pages
-    for (int i = 1; i <= 50; i++) {
+    // Insert initial data to create pages
+    const int INITIAL_RECORDS = 50;
+    for (int i = 1; i <= INITIAL_RECORDS; i++) {
         char sql[256];
-        snprintf(sql, sizeof(sql), "INSERT INTO test (data) VALUES ('Test data row %d for hole detection')", i);
+        snprintf(sql, sizeof(sql), "INSERT INTO test (data) VALUES ('Initial data row %d for hole detection')", i);
         rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
         if (rc != SQLITE_OK) {
             snprintf(result->message, sizeof(result->message), "Insert failed at row %d: %s", i, sqlite3_errmsg(db));
@@ -58,12 +59,55 @@ int test_hole_detection(TestResult* result) {
             return 0;
         }
     }
-    result->passed++;
+    result->passed++; // Initial data insertion completed
     
     // Force sync to ensure pages are written
     sqlite3_exec(db, "PRAGMA synchronous=FULL", NULL, NULL, NULL);
     
-    // Delete some data to create holes
+    // Verify initial data integrity
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(db, "SELECT id, data FROM test WHERE id <= ? ORDER BY id", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Initial verification preparation failed: %s", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("hole_vfs");
+        return 0;
+    }
+    
+    sqlite3_bind_int(stmt, 1, INITIAL_RECORDS);
+    int verified_initial = 0;
+    int initial_data_ok = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW && initial_data_ok) {
+        int id = sqlite3_column_int(stmt, 0);
+        const char* data = (const char*)sqlite3_column_text(stmt, 1);
+        
+        char expected_data[256];
+        snprintf(expected_data, sizeof(expected_data), "Initial data row %d for hole detection", id);
+        
+        if (strcmp(data, expected_data) != 0) {
+            snprintf(result->message, sizeof(result->message), 
+                    "Initial data integrity error: id=%d, expected='%s', got='%s'", 
+                    id, expected_data, data);
+            initial_data_ok = 0;
+            break;
+        }
+        verified_initial++;
+    }
+    sqlite3_finalize(stmt);
+    
+    if (!initial_data_ok || verified_initial != INITIAL_RECORDS) {
+        if (initial_data_ok) {
+            snprintf(result->message, sizeof(result->message), 
+                    "Initial record count mismatch: expected %d, verified %d", 
+                    INITIAL_RECORDS, verified_initial);
+        }
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("hole_vfs");
+        return 0;
+    }
+    result->passed++; // Initial data verification passed
+    
+    // Delete some data to create holes (every 3rd record)
     rc = sqlite3_exec(db, "DELETE FROM test WHERE id % 3 = 0", NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "Delete failed: %s", sqlite3_errmsg(db));
@@ -71,32 +115,80 @@ int test_hole_detection(TestResult* result) {
         sqlite3_ccvfs_destroy("hole_vfs");
         return 0;
     }
-    result->passed++;
+    result->passed++; // Deletion completed
     
     // Insert new data to test hole reuse
-    for (int i = 51; i <= 70; i++) {
+    const int NEW_RECORD_START = 51;
+    const int NEW_RECORD_END = 70;
+    for (int i = NEW_RECORD_START; i <= NEW_RECORD_END; i++) {
         char sql[256];
         snprintf(sql, sizeof(sql), "INSERT INTO test (data) VALUES ('New data row %d for hole reuse')", i);
         rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
         if (rc != SQLITE_OK) {
-            snprintf(result->message, sizeof(result->message), "New insert failed: %s", sqlite3_errmsg(db));
+            snprintf(result->message, sizeof(result->message), "New insert failed at row %d: %s", i, sqlite3_errmsg(db));
             sqlite3_close(db);
             sqlite3_ccvfs_destroy("hole_vfs");
             return 0;
         }
     }
+    result->passed++; // New data insertion completed
     
-    // Verify data integrity
-    sqlite3_stmt *stmt;
-    rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM test", -1, &stmt, NULL);
-    if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
-        int count = sqlite3_column_int(stmt, 0);
-        result->passed++;
-        snprintf(result->message, sizeof(result->message), "Hole detection completed, %d records verified", count);
-        sqlite3_finalize(stmt);
-    } else {
-        snprintf(result->message, sizeof(result->message), "Data verification failed");
+    // Comprehensive data integrity verification
+    rc = sqlite3_prepare_v2(db, "SELECT id, data FROM test ORDER BY id", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Final verification preparation failed: %s", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("hole_vfs");
+        return 0;
     }
+    
+    int total_verified = 0;
+    int data_integrity_ok = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW && data_integrity_ok) {
+        int id = sqlite3_column_int(stmt, 0);
+        const char* data = (const char*)sqlite3_column_text(stmt, 1);
+        
+        char expected_data[256];
+        if (id <= INITIAL_RECORDS) {
+            // Should only see records that weren't deleted (not divisible by 3)
+            if (id % 3 == 0) {
+                snprintf(result->message, sizeof(result->message), 
+                        "Unexpected record found: id=%d should have been deleted", id);
+                data_integrity_ok = 0;
+                break;
+            }
+            snprintf(expected_data, sizeof(expected_data), "Initial data row %d for hole detection", id);
+        } else {
+            // New records
+            snprintf(expected_data, sizeof(expected_data), "New data row %d for hole reuse", id);
+        }
+        
+        if (strcmp(data, expected_data) != 0) {
+            snprintf(result->message, sizeof(result->message), 
+                    "Data integrity error: id=%d, expected='%s', got='%s'", 
+                    id, expected_data, data);
+            data_integrity_ok = 0;
+            break;
+        }
+        total_verified++;
+    }
+    
+    sqlite3_finalize(stmt);
+    
+    // Calculate expected record count: original - deleted + new
+    int expected_remaining = INITIAL_RECORDS - (INITIAL_RECORDS / 3); // Records not divisible by 3
+    int expected_total = expected_remaining + (NEW_RECORD_END - NEW_RECORD_START + 1);
+    
+    if (data_integrity_ok && total_verified == expected_total) {
+        result->passed++; // Final data integrity verification passed
+        snprintf(result->message, sizeof(result->message), 
+                "Hole detection test passed: %d records verified (deleted %d, added %d)", 
+                total_verified, INITIAL_RECORDS / 3, NEW_RECORD_END - NEW_RECORD_START + 1);
+    } else if (data_integrity_ok) {
+        snprintf(result->message, sizeof(result->message), 
+                "Record count mismatch: expected %d, verified %d", expected_total, total_verified);
+    }
+    // Error message already set for data integrity issues
     
     sqlite3_close(db);
     sqlite3_ccvfs_destroy("hole_vfs");
@@ -108,7 +200,7 @@ int test_hole_detection(TestResult* result) {
 int test_simple_hole(TestResult* result) {
     result->name = "Simple Hole Test";
     result->passed = 0;
-    result->total = 4;
+    result->total = 6;  // Increased for data verification
     strcpy(result->message, "");
     
     cleanup_test_files("simple_holes");
@@ -127,41 +219,123 @@ int test_simple_hole(TestResult* result) {
     // Open database
     sqlite3 *db = NULL;
     rc = sqlite3_open_v2("simple_holes.db", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "simple_hole_vfs");
-    if (rc == SQLITE_OK) {
-        result->passed++;
-        
-        // Create table and insert data
-        rc = sqlite3_exec(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)", NULL, NULL, NULL);
-        if (rc == SQLITE_OK) {
-            result->passed++;
-            
-            // Insert and delete data to create holes
-            for (int i = 1; i <= 10; i++) {
-                char sql[256];
-                snprintf(sql, sizeof(sql), "INSERT INTO test (data) VALUES ('Simple data %d')", i);
-                sqlite3_exec(db, sql, NULL, NULL, NULL);
-            }
-            
-            sqlite3_exec(db, "DELETE FROM test WHERE id % 2 = 0", NULL, NULL, NULL);
-            
-            // Insert new data
-            for (int i = 11; i <= 15; i++) {
-                char sql[256];
-                snprintf(sql, sizeof(sql), "INSERT INTO test (data) VALUES ('New data %d')", i);
-                sqlite3_exec(db, sql, NULL, NULL, NULL);
-            }
-            
-            result->passed++;
-            strcpy(result->message, "Simple hole management verified");
-        } else {
-            snprintf(result->message, sizeof(result->message), "Table creation failed: %s", sqlite3_errmsg(db));
-        }
-        
-        sqlite3_close(db);
-    } else {
+    if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "Database open failed: %s", sqlite3_errmsg(db));
+        sqlite3_ccvfs_destroy("simple_hole_vfs");
+        return 0;
+    }
+    result->passed++;
+    
+    // Create table and insert initial data
+    rc = sqlite3_exec(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Table creation failed: %s", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("simple_hole_vfs");
+        return 0;
+    }
+    result->passed++;
+    
+    // Insert initial data
+    const int INITIAL_COUNT = 10;
+    for (int i = 1; i <= INITIAL_COUNT; i++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql), "INSERT INTO test (data) VALUES ('Simple initial data %d')", i);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        if (rc != SQLITE_OK) {
+            snprintf(result->message, sizeof(result->message), "Initial insert failed at record %d: %s", i, sqlite3_errmsg(db));
+            sqlite3_close(db);
+            sqlite3_ccvfs_destroy("simple_hole_vfs");
+            return 0;
+        }
+    }
+    result->passed++; // Initial data insertion completed
+    
+    // Delete every other record to create holes
+    rc = sqlite3_exec(db, "DELETE FROM test WHERE id % 2 = 0", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Delete operation failed: %s", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("simple_hole_vfs");
+        return 0;
     }
     
+    // Insert new data to potentially reuse holes
+    const int NEW_START = 11;
+    const int NEW_END = 15;
+    for (int i = NEW_START; i <= NEW_END; i++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql), "INSERT INTO test (data) VALUES ('Simple new data %d')", i);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        if (rc != SQLITE_OK) {
+            snprintf(result->message, sizeof(result->message), "New insert failed at record %d: %s", i, sqlite3_errmsg(db));
+            sqlite3_close(db);
+            sqlite3_ccvfs_destroy("simple_hole_vfs");
+            return 0;
+        }
+    }
+    result->passed++; // New data insertion completed
+    
+    // Comprehensive data integrity verification
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(db, "SELECT id, data FROM test ORDER BY id", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Verification preparation failed: %s", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("simple_hole_vfs");
+        return 0;
+    }
+    
+    int verified_count = 0;
+    int data_integrity_ok = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW && data_integrity_ok) {
+        int id = sqlite3_column_int(stmt, 0);
+        const char* data = (const char*)sqlite3_column_text(stmt, 1);
+        
+        char expected_data[256];
+        if (id <= INITIAL_COUNT) {
+            // Should only see odd-numbered records (even ones were deleted)
+            if (id % 2 == 0) {
+                snprintf(result->message, sizeof(result->message), 
+                        "Unexpected record found: id=%d should have been deleted", id);
+                data_integrity_ok = 0;
+                break;
+            }
+            snprintf(expected_data, sizeof(expected_data), "Simple initial data %d", id);
+        } else {
+            // New records
+            snprintf(expected_data, sizeof(expected_data), "Simple new data %d", id);
+        }
+        
+        if (strcmp(data, expected_data) != 0) {
+            snprintf(result->message, sizeof(result->message), 
+                    "Data integrity error: id=%d, expected='%s', got='%s'", 
+                    id, expected_data, data);
+            data_integrity_ok = 0;
+            break;
+        }
+        verified_count++;
+    }
+    
+    sqlite3_finalize(stmt);
+    
+    // Calculate expected count: 5 odd records (1,3,5,7,9) + 5 new records (11-15)
+    int expected_remaining = INITIAL_COUNT / 2; // Only odd records remain
+    int expected_total = expected_remaining + (NEW_END - NEW_START + 1);
+    
+    if (data_integrity_ok && verified_count == expected_total) {
+        result->passed++; // Data integrity verification passed
+        snprintf(result->message, sizeof(result->message), 
+                "Simple hole test passed: %d records verified (deleted %d, added %d)", 
+                verified_count, INITIAL_COUNT / 2, NEW_END - NEW_START + 1);
+    } else if (data_integrity_ok) {
+        snprintf(result->message, sizeof(result->message), 
+                "Record count mismatch: expected %d, verified %d", expected_total, verified_count);
+    }
+    // Error message already set for data integrity issues
+    
+    sqlite3_close(db);
     sqlite3_ccvfs_destroy("simple_hole_vfs");
+    
     return (result->passed == result->total) ? 1 : 0;
 }

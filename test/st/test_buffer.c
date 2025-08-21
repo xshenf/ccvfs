@@ -10,7 +10,7 @@
 int test_batch_write_buffer(TestResult* result) {
     result->name = "Batch Write Buffer Test";
     result->passed = 0;
-    result->total = 5;
+    result->total = 7;  // Increased total for additional verification steps
     strcpy(result->message, "");
     
     cleanup_test_files("test_buffer");
@@ -55,7 +55,7 @@ int test_batch_write_buffer(TestResult* result) {
         return 0;
     }
     
-    // Create table and insert data
+    // Create table and insert test data
     rc = sqlite3_exec(db, "CREATE TABLE test_buffer (id INTEGER PRIMARY KEY, data TEXT)", NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "Table creation failed: %s", sqlite3_errmsg(db));
@@ -64,35 +64,93 @@ int test_batch_write_buffer(TestResult* result) {
         return 0;
     }
     
-    // Insert data to trigger buffering
+    // Insert test data with known content for verification
+    const int TEST_RECORDS = 100;
     sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < TEST_RECORDS; i++) {
         char sql[256];
-        snprintf(sql, sizeof(sql), "INSERT INTO test_buffer (data) VALUES ('Buffer test data %d')", i);
-        sqlite3_exec(db, sql, NULL, NULL, NULL);
+        snprintf(sql, sizeof(sql), "INSERT INTO test_buffer (data) VALUES ('Buffer test data record %d')", i);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        if (rc != SQLITE_OK) {
+            snprintf(result->message, sizeof(result->message), "Insert failed at record %d: %s", i, sqlite3_errmsg(db));
+            sqlite3_close(db);
+            sqlite3_ccvfs_destroy("buffer_vfs");
+            return 0;
+        }
     }
     sqlite3_exec(db, "COMMIT TRANSACTION", NULL, NULL, NULL);
-    result->passed++;
+    result->passed++; // Data insertion completed
     
-    // Get final buffer stats
+    // Verify buffer statistics
     uint32_t final_hits, final_flushes, final_merges, final_writes;
     rc = sqlite3_ccvfs_get_buffer_stats(db, &final_hits, &final_flushes, &final_merges, &final_writes);
-    if (rc == SQLITE_OK) {
-        if (final_writes > initial_writes || final_flushes > initial_flushes) {
-            result->passed++;
-            snprintf(result->message, sizeof(result->message), 
-                    "Buffering active: %u writes, %u flushes", 
-                    final_writes - initial_writes, 
-                    final_flushes - initial_flushes);
-        } else {
-            snprintf(result->message, sizeof(result->message), "No buffer activity detected");
-        }
+    if (rc == SQLITE_OK && (final_writes > initial_writes || final_flushes > initial_flushes)) {
+        result->passed++; // Buffer activity verified
     } else {
-        snprintf(result->message, sizeof(result->message), "Failed to get final buffer stats");
+        snprintf(result->message, sizeof(result->message), "Buffer activity verification failed");
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("buffer_vfs");
+        return 0;
     }
     
-    // Test manual flush
-    sqlite3_ccvfs_flush_write_buffer(db);
+    // Critical: Verify data integrity by reading back all records
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(db, "SELECT id, data FROM test_buffer ORDER BY id", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Select preparation failed: %s", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("buffer_vfs");
+        return 0;
+    }
+    
+    int verified_records = 0;
+    int data_integrity_ok = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW && data_integrity_ok) {
+        int id = sqlite3_column_int(stmt, 0);
+        const char* data = (const char*)sqlite3_column_text(stmt, 1);
+        
+        // Verify each record matches expected content
+        char expected_data[256];
+        snprintf(expected_data, sizeof(expected_data), "Buffer test data record %d", id - 1); // id is 1-based, our loop was 0-based
+        
+        if (strcmp(data, expected_data) != 0) {
+            snprintf(result->message, sizeof(result->message), 
+                    "Data integrity error: id=%d, expected='%s', got='%s'", 
+                    id, expected_data, data);
+            data_integrity_ok = 0;
+            break;
+        }
+        verified_records++;
+    }
+    
+    sqlite3_finalize(stmt);
+    
+    if (data_integrity_ok && verified_records == TEST_RECORDS) {
+        result->passed++; // Data integrity verification passed
+    } else if (data_integrity_ok) {
+        snprintf(result->message, sizeof(result->message), 
+                "Record count mismatch: expected %d, verified %d", 
+                TEST_RECORDS, verified_records);
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("buffer_vfs");
+        return 0;
+    } else {
+        // Error message already set in the loop
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("buffer_vfs");
+        return 0;
+    }
+    
+    // Test manual flush and verify it works
+    rc = sqlite3_ccvfs_flush_write_buffer(db);
+    if (rc == SQLITE_OK) {
+        result->passed++; // Manual flush successful
+        snprintf(result->message, sizeof(result->message), 
+                "Buffer test passed: %d records verified, buffering active (%u writes, %u flushes)", 
+                verified_records, final_writes - initial_writes, final_flushes - initial_flushes);
+    } else {
+        snprintf(result->message, sizeof(result->message), "Manual flush failed: %d", rc);
+    }
     
     sqlite3_close(db);
     sqlite3_ccvfs_destroy("buffer_vfs");
@@ -104,7 +162,7 @@ int test_batch_write_buffer(TestResult* result) {
 int test_simple_buffer(TestResult* result) {
     result->name = "Simple Buffer Test";
     result->passed = 0;
-    result->total = 4;
+    result->total = 5;  // Increased for data verification
     strcpy(result->message, "");
     
     cleanup_test_files("simple_buffer");
@@ -122,44 +180,100 @@ int test_simple_buffer(TestResult* result) {
     
     // Configure simple buffer
     rc = sqlite3_ccvfs_configure_write_buffer("simple_buffer_vfs", 1, 16, 1024*1024, 8);
-    if (rc == SQLITE_OK) {
-        result->passed++;
-        
-        // Open database
-        sqlite3 *db = NULL;
-        rc = sqlite3_open_v2("simple_buffer.db", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "simple_buffer_vfs");
-        if (rc == SQLITE_OK) {
-            result->passed++;
-            
-            // Simple operations
-            rc = sqlite3_exec(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)", NULL, NULL, NULL);
-            if (rc == SQLITE_OK) {
-                for (int i = 0; i < 10; i++) {
-                    char sql[256];
-                    snprintf(sql, sizeof(sql), "INSERT INTO test (data) VALUES ('Simple test %d')", i);
-                    sqlite3_exec(db, sql, NULL, NULL, NULL);
-                }
-                
-                // Test manual flush
-                rc = sqlite3_ccvfs_flush_write_buffer(db);
-                if (rc == SQLITE_OK) {
-                    result->passed++;
-                    strcpy(result->message, "Simple buffer operations completed");
-                } else {
-                    snprintf(result->message, sizeof(result->message), "Manual flush failed: %d", rc);
-                }
-            } else {
-                snprintf(result->message, sizeof(result->message), "Table creation failed: %s", sqlite3_errmsg(db));
-            }
-            
-            sqlite3_close(db);
-        } else {
-            snprintf(result->message, sizeof(result->message), "Database open failed: %s", sqlite3_errmsg(db));
-        }
-    } else {
+    if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "Buffer configuration failed: %d", rc);
+        sqlite3_ccvfs_destroy("simple_buffer_vfs");
+        return 0;
+    }
+    result->passed++;
+    
+    // Open database
+    sqlite3 *db = NULL;
+    rc = sqlite3_open_v2("simple_buffer.db", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "simple_buffer_vfs");
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Database open failed: %s", sqlite3_errmsg(db));
+        sqlite3_ccvfs_destroy("simple_buffer_vfs");
+        return 0;
+    }
+    result->passed++;
+    
+    // Create table and insert test data
+    rc = sqlite3_exec(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, data TEXT)", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Table creation failed: %s", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("simple_buffer_vfs");
+        return 0;
     }
     
+    // Insert test data with known content
+    const int TEST_COUNT = 10;
+    for (int i = 0; i < TEST_COUNT; i++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql), "INSERT INTO test (data) VALUES ('Simple test record %d')", i);
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        if (rc != SQLITE_OK) {
+            snprintf(result->message, sizeof(result->message), "Insert failed at record %d: %s", i, sqlite3_errmsg(db));
+            sqlite3_close(db);
+            sqlite3_ccvfs_destroy("simple_buffer_vfs");
+            return 0;
+        }
+    }
+    result->passed++; // Data insertion completed
+    
+    // Test manual flush
+    rc = sqlite3_ccvfs_flush_write_buffer(db);
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Manual flush failed: %d", rc);
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("simple_buffer_vfs");
+        return 0;
+    }
+    
+    // Verify data integrity by reading back all records
+    sqlite3_stmt *stmt;
+    rc = sqlite3_prepare_v2(db, "SELECT id, data FROM test ORDER BY id", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(result->message, sizeof(result->message), "Select preparation failed: %s", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        sqlite3_ccvfs_destroy("simple_buffer_vfs");
+        return 0;
+    }
+    
+    int verified_count = 0;
+    int data_integrity_ok = 1;
+    while (sqlite3_step(stmt) == SQLITE_ROW && data_integrity_ok) {
+        int id = sqlite3_column_int(stmt, 0);
+        const char* data = (const char*)sqlite3_column_text(stmt, 1);
+        
+        // Verify record content matches expected
+        char expected_data[256];
+        snprintf(expected_data, sizeof(expected_data), "Simple test record %d", id - 1);
+        
+        if (strcmp(data, expected_data) != 0) {
+            snprintf(result->message, sizeof(result->message), 
+                    "Data integrity error: id=%d, expected='%s', got='%s'", 
+                    id, expected_data, data);
+            data_integrity_ok = 0;
+            break;
+        }
+        verified_count++;
+    }
+    
+    sqlite3_finalize(stmt);
+    
+    if (data_integrity_ok && verified_count == TEST_COUNT) {
+        result->passed++; // Data integrity verification passed
+        snprintf(result->message, sizeof(result->message), 
+                "Simple buffer test passed: %d records verified", verified_count);
+    } else if (data_integrity_ok) {
+        snprintf(result->message, sizeof(result->message), 
+                "Record count mismatch: expected %d, verified %d", TEST_COUNT, verified_count);
+    }
+    // Error message already set for data integrity issues
+    
+    sqlite3_close(db);
     sqlite3_ccvfs_destroy("simple_buffer_vfs");
+    
     return (result->passed == result->total) ? 1 : 0;
 }
