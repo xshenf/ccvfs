@@ -84,16 +84,10 @@ if(LZMA_FOUND)
     message(STATUS "LZMA support enabled")
 endif()
 
-# Essential test programs
+# Enable testing support
+enable_testing()
 
-add_executable(vfs_connection_test test/vfs_connection_test.c)
-target_link_libraries(vfs_connection_test sqlitecc)
-
-add_executable(large_db_stress_test test/large_db_stress_test.c)
-target_link_libraries(large_db_stress_test sqlitecc)
-
-add_executable(simple_large_test test/simple_large_test.c)
-target_link_libraries(simple_large_test sqlitecc)
+# Essential tools (keep only essential ones)
 
 # Shell程序 - 使用SQLite原始shell加上我们的扩展
 add_executable(shell sqlite3/shell.c src/shell.c)
@@ -104,42 +98,12 @@ target_compile_definitions(shell PRIVATE SQLITE_ENABLE_CEROD=1)
 add_executable(db_tool test/tool/db_tool.c test/tool/db_compare.c test/tool/db_generator.c)
 target_link_libraries(db_tool sqlitecc)
 
-# 数据库生成工具
-add_executable(db_generator src/db_generator.c)
-target_link_libraries(db_generator sqlitecc)
+# Add test subdirectories
+add_subdirectory(test/ut)  # Unit tests
+add_subdirectory(test/st)  # System tests
 
-# 简单数据库测试程序
-add_executable(simple_db_test test/simple_db_test.c)
-target_link_libraries(simple_db_test sqlitecc)
-
-# 数据库比对工具
-add_executable(db_compare src/db_compare.c)
-target_link_libraries(db_compare sqlitecc)
-
-# 空洞检测测试程序
-add_executable(test_hole_detection test/test_hole_detection.c)
-target_link_libraries(test_hole_detection sqlitecc)
-
-# 简化空洞检测测试程序
-add_executable(simple_hole_test test/simple_hole_test.c)
-target_link_libraries(simple_hole_test sqlitecc)
-
-# 批量写入缓冲测试程序
-add_executable(batch_write_buffer_test test/batch_write_buffer_test.c)
-target_link_libraries(batch_write_buffer_test sqlitecc)
-
-# 简单缓冲测试程序
-add_executable(simple_buffer_test test/simple_buffer_test.c)
-target_link_libraries(simple_buffer_test sqlitecc)
-
-# 链接数学库（某些平台需要）
+# Link math library for Unix platforms (except macOS)
 if(UNIX AND NOT APPLE)
     target_link_libraries(shell m)
     target_link_libraries(db_tool m)
-    target_link_libraries(db_generator m)
-    target_link_libraries(simple_db_test m)
-    target_link_libraries(db_compare m)
-    target_link_libraries(test_hole_detection m)
-    target_link_libraries(simple_hole_test m)
-    target_link_libraries(batch_write_buffer_test m)
 endif()

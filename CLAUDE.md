@@ -58,24 +58,67 @@ cmake --build .
 
 ### Running Tests
 
-**Basic functionality test:**
+**Unified system test suite (recommended):**
 ```bash
 # From build directory
-./test_main
-# With debug output
-./test_main --debug
+cd build
+
+# Run all system tests
+ctest -L SystemTest
+
+# Run specific test categories
+ctest -L Basic          # Basic functionality tests
+ctest -L Performance    # Performance and stress tests
+ctest -L Storage        # Hole detection and storage tests
+ctest -L Buffer         # Buffer management tests
+ctest -L Tools          # Database tools tests
+
+# Run individual system tests
+ctest -R SystemTest_VFS_Connection
+ctest -R SystemTest_Simple_DB
+ctest -R SystemTest_Large_DB_Stress
+
+# Run system tests with verbose output
+ctest -L SystemTest -V
+
+# Run all tests (unit + system)
+ctest
+
+# Direct execution of unified test runner
+./test/st/system_tests --help
+./test/st/system_tests --list
+./test/st/system_tests vfs_connection
+./test/st/system_tests --all --verbose
 ```
 
-**Large database tests:**
+**Unit test suite:**
 ```bash
-./large_db_test        # Basic large data test
-./large_db_test_utf8   # UTF-8 data test  
-./large_db_zlib_test   # Zlib compression test
+# Run all unit tests
+ctest -R unit_tests
+
+# Run specific unit test categories
+ctest -R BasicTests       # Basic tests (recommended first)
+ctest -R CoreTests        # Core tests
+ctest -R CompressionTests # Compression tests
+ctest -R BatchWriterTests # Batch writer tests
+ctest -R IntegrationTests # Integration tests
+
+# Run with verbose output
+ctest -R unit_tests -V
+ctest --output-on-failure # Show output on failure
+```
+
+**Database tools:**
+```bash
+./db_tool.exe compress input.db output.ccvfs --compress-algo zlib
+./db_tool.exe decompress input.ccvfs output.db
+./db_tool.exe compare db1.db db2.db  # Compare database contents
+./db_tool.exe generate test.db 100M  # Generate test databases
 ```
 
 **Interactive shell:**
 ```bash
-./shell
+./shell.exe  # SQLite shell with CCVFS support
 ```
 
 ### Project Structure
