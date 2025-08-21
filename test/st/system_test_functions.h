@@ -14,6 +14,7 @@ int test_vfs_connection(TestResult* result);
 int test_simple_db(TestResult* result);
 int test_large_db_stress(TestResult* result);
 int test_simple_large(TestResult* result);
+int test_large_db_compression_integrity(TestResult* result);
 
 // Storage tests (test_storage.c)
 int test_hole_detection(TestResult* result);

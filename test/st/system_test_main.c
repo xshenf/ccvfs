@@ -14,6 +14,7 @@ static TestCase test_cases[] = {
     {"simple_db", "Simple database operations with compression", test_simple_db},
     {"large_db_stress", "Large database stress testing", test_large_db_stress},
     {"simple_large", "Simple large data operations", test_simple_large},
+    {"large_db_compression_integrity", "Large DB compression/decompression integrity test", test_large_db_compression_integrity},
     {"hole_detection", "Space hole detection functionality", test_hole_detection},
     {"simple_hole", "Simple hole management test", test_simple_hole},
     {"batch_write_buffer", "Batch write buffer functionality", test_batch_write_buffer},

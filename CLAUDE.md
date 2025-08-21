@@ -61,7 +61,7 @@ cmake --build .
 **Unified system test suite (recommended):**
 ```bash
 # From build directory
-cd build
+cd cmake-build-debug
 
 # Run all system tests
 ctest -L SystemTest

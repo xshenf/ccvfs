@@ -54,6 +54,13 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# Large Database Compression Integrity Test
+add_test(
+    NAME SystemTest_Large_DB_Compression_Integrity
+    COMMAND system_tests large_db_compression_integrity
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
 # Hole Detection Test
 add_test(
     NAME SystemTest_Hole_Detection
@@ -102,6 +109,7 @@ set_tests_properties(
     SystemTest_Simple_DB
     SystemTest_Large_DB_Stress
     SystemTest_Simple_Large
+    SystemTest_Large_DB_Compression_Integrity
     SystemTest_Hole_Detection
     SystemTest_Simple_Hole
     SystemTest_Batch_Write_Buffer
@@ -114,6 +122,7 @@ set_tests_properties(
 # Set longer timeout for stress test and all tests
 set_tests_properties(
     SystemTest_Large_DB_Stress
+    SystemTest_Large_DB_Compression_Integrity
     SystemTest_All
     PROPERTIES
     TIMEOUT 600  # 10 minutes timeout
@@ -130,6 +139,7 @@ set_tests_properties(
 set_tests_properties(
     SystemTest_Large_DB_Stress
     SystemTest_Simple_Large
+    SystemTest_Large_DB_Compression_Integrity
     PROPERTIES
     LABELS "Performance"
 )
