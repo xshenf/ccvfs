@@ -1,14 +1,15 @@
 #include "ccvfs_algorithm.h"
-#include <zlib.h>
 
-// 根据CMake检测结果包含其他压缩库
-#ifdef HAVE_LZ4
-#include <lz4.h>
-#include <lz4hc.h>
+// 只包含内置的压缩和加密库
+#ifdef HAVE_ZLIB
+#include <zlib.h>
 #endif
 
-#ifdef HAVE_LZMA
-#include <lzma.h>
+#ifdef HAVE_OPENSSL
+#include <openssl/evp.h>
+#include <openssl/aes.h>
+#include <openssl/rand.h>
+#include <openssl/err.h>
 #endif
 
 // Global algorithm registries
@@ -66,8 +67,9 @@ EncryptAlgorithm* ccvfs_find_encrypt_algorithm(const char *name) {
     return NULL;
 }
 
+#ifdef HAVE_ZLIB
 /*
- * Zlib Compression Algorithm using actual zlib library
+ * Zlib 压缩算法实现
  */
 static int zlib_compress(const unsigned char *input, int input_len, 
                         unsigned char *output, int output_len, int level) {
@@ -116,218 +118,161 @@ static CompressAlgorithm zlib_algorithm = {
     zlib_decompress,
     zlib_get_max_compressed_size
 };
+#endif // HAVE_ZLIB
 
-#ifdef HAVE_LZ4
+#ifdef HAVE_OPENSSL
 /*
- * LZ4 Compression Algorithm using real LZ4 library
+ * AES-256-CBC 加密算法实现
  */
-static int lz4_compress(const unsigned char *input, int input_len, 
-                       unsigned char *output, int output_len, int level) {
-    CCVFS_DEBUG("LZ4 compressing %d bytes (level %d)", input_len, level);
-    
-    int compressed_size;
-    if (level > 3) {
-        // Use LZ4HC for higher compression levels
-        compressed_size = LZ4_compress_HC((const char*)input, (char*)output, input_len, output_len, level);
-    } else {
-        // Use fast LZ4 for lower levels
-        compressed_size = LZ4_compress_default((const char*)input, (char*)output, input_len, output_len);
-    }
-    
-    if (compressed_size <= 0) {
-        CCVFS_ERROR("LZ4 compression failed");
-        return -1;
-    }
-    
-    CCVFS_DEBUG("LZ4 compressed %d bytes to %d bytes (%.1f%%)", 
-                input_len, compressed_size, (double)compressed_size / input_len * 100.0);
-    return compressed_size;
-}
-
-static int lz4_decompress(const unsigned char *input, int input_len,
+static int aes256_encrypt(const unsigned char *key, int key_len,
+                         const unsigned char *input, int input_len,
                          unsigned char *output, int output_len) {
-    CCVFS_DEBUG("LZ4 decompressing %d bytes", input_len);
+    CCVFS_DEBUG("AES-256 encrypting %d bytes", input_len);
     
-    int decompressed_size = LZ4_decompress_safe((const char*)input, (char*)output, input_len, output_len);
-    
-    if (decompressed_size < 0) {
-        CCVFS_ERROR("LZ4 decompression failed with error %d", decompressed_size);
+    if (key_len != 32) {
+        CCVFS_ERROR("AES-256 requires 32-byte key, got %d bytes", key_len);
         return -1;
     }
     
-    CCVFS_DEBUG("LZ4 decompressed %d bytes to %d bytes", input_len, decompressed_size);
-    return decompressed_size;
+    // AES需要IV，在输出的前16字节存储IV
+    if (output_len < input_len + 16 + 16) { // IV + 数据 + padding
+        CCVFS_ERROR("Output buffer too small for AES encryption");
+        return -1;
+    }
+    
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        CCVFS_ERROR("Failed to create EVP context");
+        return -1;
+    }
+    
+    unsigned char iv[16];
+    if (RAND_bytes(iv, sizeof(iv)) != 1) {
+        CCVFS_ERROR("Failed to generate random IV");
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    
+    // 复制IV到输出缓冲区开头
+    memcpy(output, iv, 16);
+    
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv) != 1) {
+        CCVFS_ERROR("Failed to initialize AES encryption");
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    
+    int len, ciphertext_len;
+    if (EVP_EncryptUpdate(ctx, output + 16, &len, input, input_len) != 1) {
+        CCVFS_ERROR("Failed to encrypt data");
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    ciphertext_len = len;
+    
+    if (EVP_EncryptFinal_ex(ctx, output + 16 + len, &len) != 1) {
+        CCVFS_ERROR("Failed to finalize encryption");
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    ciphertext_len += len;
+    
+    EVP_CIPHER_CTX_free(ctx);
+    
+    CCVFS_DEBUG("AES-256 encrypted %d bytes to %d bytes", input_len, ciphertext_len + 16);
+    return ciphertext_len + 16; // 包含IV
 }
 
-static int lz4_get_max_compressed_size(int input_len) {
-    return LZ4_compressBound(input_len);
+static int aes256_decrypt(const unsigned char *key, int key_len,
+                         const unsigned char *input, int input_len,
+                         unsigned char *output, int output_len) {
+    CCVFS_DEBUG("AES-256 decrypting %d bytes", input_len);
+    
+    if (key_len != 32) {
+        CCVFS_ERROR("AES-256 requires 32-byte key, got %d bytes", key_len);
+        return -1;
+    }
+    
+    if (input_len < 16) {
+        CCVFS_ERROR("Input too small to contain IV");
+        return -1;
+    }
+    
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        CCVFS_ERROR("Failed to create EVP context");
+        return -1;
+    }
+    
+    // 从输入中提取IV
+    const unsigned char *iv = input;
+    const unsigned char *ciphertext = input + 16;
+    int ciphertext_len = input_len - 16;
+    
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv) != 1) {
+        CCVFS_ERROR("Failed to initialize AES decryption");
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    
+    int len, plaintext_len;
+    if (EVP_DecryptUpdate(ctx, output, &len, ciphertext, ciphertext_len) != 1) {
+        CCVFS_ERROR("Failed to decrypt data");
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    plaintext_len = len;
+    
+    if (EVP_DecryptFinal_ex(ctx, output + len, &len) != 1) {
+        CCVFS_ERROR("Failed to finalize decryption");
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    plaintext_len += len;
+    
+    EVP_CIPHER_CTX_free(ctx);
+    
+    CCVFS_DEBUG("AES-256 decrypted %d bytes to %d bytes", input_len, plaintext_len);
+    return plaintext_len;
 }
 
-static CompressAlgorithm lz4_algorithm = {
-    "lz4",
-    lz4_compress,
-    lz4_decompress,
-    lz4_get_max_compressed_size
+static EncryptAlgorithm aes256_algorithm = {
+    "aes256",
+    aes256_encrypt,
+    aes256_decrypt,
+    32  // 32-byte key for AES-256
 };
-#endif // HAVE_LZ4
-
-#ifdef HAVE_LZMA
-/*
- * LZMA Compression Algorithm using real LZMA library
- */
-static int lzma_compress(const unsigned char *input, int input_len, 
-                        unsigned char *output, int output_len, int level) {
-    CCVFS_DEBUG("LZMA compressing %d bytes (level %d)", input_len, level);
-    
-    // Set compression level (0-9, default 6)
-    if (level < 0 || level > 9) level = 6;
-    
-    lzma_stream strm = LZMA_STREAM_INIT;
-    lzma_ret ret = lzma_easy_encoder(&strm, level, LZMA_CHECK_CRC64);
-    
-    if (ret != LZMA_OK) {
-        CCVFS_ERROR("LZMA encoder initialization failed: %d", ret);
-        return -1;
-    }
-    
-    strm.next_in = input;
-    strm.avail_in = input_len;
-    strm.next_out = output;
-    strm.avail_out = output_len;
-    
-    ret = lzma_code(&strm, LZMA_FINISH);
-    
-    if (ret != LZMA_STREAM_END) {
-        lzma_end(&strm);
-        CCVFS_ERROR("LZMA compression failed: %d", ret);
-        return -1;
-    }
-    
-    size_t compressed_size = output_len - strm.avail_out;
-    lzma_end(&strm);
-    
-    CCVFS_DEBUG("LZMA compressed %d bytes to %zu bytes (%.1f%%)", 
-                input_len, compressed_size, (double)compressed_size / input_len * 100.0);
-    return (int)compressed_size;
-}
-
-static int lzma_decompress(const unsigned char *input, int input_len,
-                          unsigned char *output, int output_len) {
-    CCVFS_DEBUG("LZMA decompressing %d bytes", input_len);
-    
-    lzma_stream strm = LZMA_STREAM_INIT;
-    lzma_ret ret = lzma_stream_decoder(&strm, UINT64_MAX, LZMA_CONCATENATED);
-    
-    if (ret != LZMA_OK) {
-        CCVFS_ERROR("LZMA decoder initialization failed: %d", ret);
-        return -1;
-    }
-    
-    strm.next_in = input;
-    strm.avail_in = input_len;
-    strm.next_out = output;
-    strm.avail_out = output_len;
-    
-    ret = lzma_code(&strm, LZMA_FINISH);
-    
-    if (ret != LZMA_STREAM_END && ret != LZMA_OK) {
-        lzma_end(&strm);
-        CCVFS_ERROR("LZMA decompression failed: %d", ret);
-        return -1;
-    }
-    
-    size_t decompressed_size = output_len - strm.avail_out;
-    lzma_end(&strm);
-    
-    CCVFS_DEBUG("LZMA decompressed %d bytes to %zu bytes", input_len, decompressed_size);
-    return (int)decompressed_size;
-}
-
-static int lzma_get_max_compressed_size(int input_len) {
-    // LZMA worst case: input + 5% + 32KB
-    return input_len + (input_len / 20) + (32 * 1024);
-}
-
-static CompressAlgorithm lzma_algorithm = {
-    "lzma",
-    lzma_compress,
-    lzma_decompress,
-    lzma_get_max_compressed_size
-};
-#endif // HAVE_LZMA
-
-/*
- * Simple XOR Encryption Algorithm (for testing only)
- */
-static int xor_encrypt(const unsigned char *key, int key_len,
-                      const unsigned char *input, int input_len,
-                      unsigned char *output, int output_len) {
-    CCVFS_DEBUG("XOR encrypting %d bytes", input_len);
-    
-    if (output_len < input_len) {
-        CCVFS_ERROR("Output buffer too small for XOR encryption");
-        return -1;
-    }
-    
-    for (int i = 0; i < input_len; i++) {
-        output[i] = input[i] ^ key[i % key_len];
-    }
-    
-    return input_len;
-}
-
-static int xor_decrypt(const unsigned char *key, int key_len,
-                      const unsigned char *input, int input_len,
-                      unsigned char *output, int output_len) {
-    CCVFS_DEBUG("XOR decrypting %d bytes", input_len);
-    
-    if (output_len < input_len) {
-        CCVFS_ERROR("Output buffer too small for XOR decryption");
-        return -1;
-    }
-    
-    // XOR encryption/decryption is symmetric
-    for (int i = 0; i < input_len; i++) {
-        output[i] = input[i] ^ key[i % key_len];
-    }
-    
-    return input_len;
-}
-
-static EncryptAlgorithm xor_algorithm = {
-    "xor",
-    xor_encrypt,
-    xor_decrypt,
-    16  // 16-byte key
-};
+#endif // HAVE_OPENSSL
 
 /*
- * Initialize builtin algorithms
+ * 初始化内置算法
  */
 void ccvfs_init_builtin_algorithms(void) {
     if (g_algorithms_initialized) return;
     
-    // Initialize arrays to NULL
+    // 初始化数组为空
     memset(g_compress_algorithms, 0, sizeof(g_compress_algorithms));
     memset(g_encrypt_algorithms, 0, sizeof(g_encrypt_algorithms));
     
-    // Register real compression algorithms
+#ifdef HAVE_ZLIB
+    // 注册zlib压缩算法
     g_compress_algorithms[g_compress_algorithm_count++] = &zlib_algorithm;
-    
-#ifdef HAVE_LZ4
-    g_compress_algorithms[g_compress_algorithm_count++] = &lz4_algorithm;
+    CCVFS_DEBUG("Registered zlib compression algorithm");
 #endif
     
-#ifdef HAVE_LZMA
-    g_compress_algorithms[g_compress_algorithm_count++] = &lzma_algorithm;
-#endif
+#ifdef HAVE_OPENSSL
+    // 初始化OpenSSL
+    OpenSSL_add_all_algorithms();
+    ERR_load_crypto_strings();
     
-    // Register simple encryption algorithms (for testing)
-    g_encrypt_algorithms[g_encrypt_algorithm_count++] = &xor_algorithm;
+    // 注册AES-256加密算法
+    g_encrypt_algorithms[g_encrypt_algorithm_count++] = &aes256_algorithm;
+    CCVFS_DEBUG("Registered AES-256 encryption algorithm");
+#endif
     
     g_algorithms_initialized = 1;
     
-    CCVFS_INFO("Initialized %d compression and %d encryption algorithms", 
+    CCVFS_DEBUG("Initialized %d compression and %d encryption algorithms",
                g_compress_algorithm_count, g_encrypt_algorithm_count);
 }
 
@@ -357,7 +302,7 @@ int sqlite3_ccvfs_register_compress_algorithm(CompressAlgorithm *algorithm) {
     }
     
     g_compress_algorithms[g_compress_algorithm_count++] = algorithm;
-    CCVFS_INFO("Registered compression algorithm: %s", algorithm->name);
+    CCVFS_DEBUG("Registered compression algorithm: %s", algorithm->name);
     return SQLITE_OK;
 }
 
@@ -387,7 +332,7 @@ int sqlite3_ccvfs_register_encrypt_algorithm(EncryptAlgorithm *algorithm) {
     }
     
     g_encrypt_algorithms[g_encrypt_algorithm_count++] = algorithm;
-    CCVFS_INFO("Registered encryption algorithm: %s", algorithm->name);
+    CCVFS_DEBUG("Registered encryption algorithm: %s", algorithm->name);
     return SQLITE_OK;
 }
 

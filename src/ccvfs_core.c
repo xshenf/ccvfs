@@ -173,7 +173,7 @@ void ccvfsDlError(sqlite3_vfs *pVfs, int nByte, char *zErrMsg) {
     pCcvfs->pRootVfs->xDlError(pCcvfs->pRootVfs, nByte, zErrMsg);
 }
 
-void *(*ccvfsDlSym(sqlite3_vfs *pVfs, void *pHandle, const char *zSymbol))(void) {
+void (*ccvfsDlSym(sqlite3_vfs *pVfs, void *pHandle, const char *zSymbol))(void) {
     CCVFS *pCcvfs = (CCVFS*)pVfs;
     
     return pCcvfs->pRootVfs->xDlSym(pCcvfs->pRootVfs, pHandle, zSymbol);

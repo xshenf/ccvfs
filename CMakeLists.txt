@@ -10,6 +10,10 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DSQLITE_ENABLE_FTS5")
 option(ENABLE_DEBUG "Enable debug output" OFF)
 option(ENABLE_VERBOSE "Enable verbose output" OFF)
 
+# 算法选择选项
+option(ENABLE_ZLIB "Enable zlib compression algorithm" ON)
+option(ENABLE_OPENSSL "Enable OpenSSL encryption algorithms" ON)
+
 if(ENABLE_DEBUG)
     add_definitions(-DDEBUG)
 endif()
@@ -18,30 +22,24 @@ if(ENABLE_VERBOSE)
     add_definitions(-DVERBOSE)
 endif()
 
-find_package(ZLIB REQUIRED)
-
-# 尝试查找其他压缩库
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(LZ4 QUIET liblz4)
-    pkg_check_modules(LZMA QUIET liblzma)
-    pkg_check_modules(BROTLI QUIET libbrotlidec libbrotlienc)
+if (ENABLE_ZLIB)
+    find_package(ZLIB)
+    if(ZLIB_FOUND)
+        message(STATUS "Found ZLIB: ${ZLIB_VERSION}")
+    else()
+        message(WARNING "ZLIB not found, compress algorithms will be limited")
+    endif()
 endif()
 
-# 手动查找LZ4库
-find_path(LZ4_INCLUDE_DIR lz4.h)
-find_library(LZ4_LIBRARY lz4)
-if(LZ4_INCLUDE_DIR AND LZ4_LIBRARY)
-    set(LZ4_FOUND TRUE)
-    message(STATUS "Found LZ4: ${LZ4_LIBRARY}")
-endif()
 
-# 手动查找LZMA库
-find_path(LZMA_INCLUDE_DIR lzma.h)
-find_library(LZMA_LIBRARY lzma)
-if(LZMA_INCLUDE_DIR AND LZMA_LIBRARY)
-    set(LZMA_FOUND TRUE)
-    message(STATUS "Found LZMA: ${LZMA_LIBRARY}")
+# 查找OpenSSL
+if(ENABLE_OPENSSL)
+    find_package(OpenSSL)
+    if(OpenSSL_FOUND)
+        message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
+    else()
+        message(WARNING "OpenSSL not found, encryption algorithms will be limited")
+    endif()
 endif()
 
 # 包含目录
@@ -66,22 +64,19 @@ set(CCVFS_SRC
 
 # 主库
 add_library(sqlitecc STATIC ${SQLITE3_SRC} ${CCVFS_SRC})
-target_link_libraries(sqlitecc ZLIB::ZLIB)
 target_compile_definitions(sqlitecc PRIVATE SQLITE_ENABLE_CEROD=1)
 
-# 根据找到的库添加支持
-if(LZ4_FOUND)
-    target_include_directories(sqlitecc PRIVATE ${LZ4_INCLUDE_DIR})
-    target_link_libraries(sqlitecc ${LZ4_LIBRARY})
-    target_compile_definitions(sqlitecc PRIVATE HAVE_LZ4)
-    message(STATUS "LZ4 support enabled")
+# 根据用户选择的算法添加支持
+if(ENABLE_ZLIB AND ZLIB_FOUND)
+    target_compile_definitions(sqlitecc PRIVATE HAVE_ZLIB)
+    target_link_libraries(sqlitecc ZLIB::ZLIB)
+    message(STATUS "Zlib compression algorithm enabled")
 endif()
 
-if(LZMA_FOUND)
-    target_include_directories(sqlitecc PRIVATE ${LZMA_INCLUDE_DIR})
-    target_link_libraries(sqlitecc ${LZMA_LIBRARY})
-    target_compile_definitions(sqlitecc PRIVATE HAVE_LZMA)
-    message(STATUS "LZMA support enabled")
+if(ENABLE_OPENSSL AND OpenSSL_FOUND)
+    target_link_libraries(sqlitecc OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(sqlitecc PRIVATE HAVE_OPENSSL)
+    message(STATUS "OpenSSL encryption algorithms enabled")
 endif()
 
 # Enable testing support

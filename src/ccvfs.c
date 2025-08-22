@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+#include "ccvfs_io.h"
+
 /* 全局变量存储解析后的密钥 */
 static unsigned char g_encryption_key[32];  /* 支持最大32字节密钥 */
 static int g_key_length = 0;

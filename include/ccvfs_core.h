@@ -16,7 +16,7 @@ int ccvfsAccess(sqlite3_vfs *pVfs, const char *zName, int flags, int *pResOut);
 int ccvfsFullPathname(sqlite3_vfs *pVfs, const char *zName, int nOut, char *zOut);
 void *ccvfsDlOpen(sqlite3_vfs *pVfs, const char *zFilename);
 void ccvfsDlError(sqlite3_vfs *pVfs, int nByte, char *zErrMsg);
-void *(*ccvfsDlSym(sqlite3_vfs *pVfs, void *pHandle, const char *zSymbol))(void);
+void (*ccvfsDlSym(sqlite3_vfs *pVfs, void *pHandle, const char *zSymbol))(void);
 void ccvfsDlClose(sqlite3_vfs *pVfs, void *pHandle);
 int ccvfsRandomness(sqlite3_vfs *pVfs, int nByte, char *zOut);
 int ccvfsSleep(sqlite3_vfs *pVfs, int microseconds);
