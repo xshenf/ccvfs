@@ -97,67 +97,94 @@ void sqlite3_ccvfs_show_status(void) {
 }
 
 /*
+** 将16进制字符串解析为二进制数据的辅助函数
+** 输入: hexStr - 16进制字符串 (例如: "48656c6c6f")
+** 输出: output - 输出缓冲区
+** 返回: 解析的字节数，错误时返回-1
+*/
+static int hex_string_to_bytes(const char *hexStr, unsigned char *output, int maxBytes) {
+    if (!hexStr || !output) {
+        return -1;
+    }
+    
+    int hexLen = (int)strlen(hexStr);
+    if (hexLen % 2 != 0) {
+        printf("CCVFS: Invalid hex string length (must be even)\n");
+        return -1;
+    }
+    
+    int byteLen = hexLen / 2;
+    if (byteLen > maxBytes) {
+        printf("CCVFS: Hex string too long (max %d bytes)\n", maxBytes);
+        return -1;
+    }
+    
+    for (int i = 0; i < byteLen; i++) {
+        char hex[3] = {hexStr[i*2], hexStr[i*2+1], '\0'};
+        char *endptr;
+        unsigned long val = strtoul(hex, &endptr, 16);
+        
+        if (*endptr != '\0' || val > 255) {
+            printf("CCVFS: Invalid hex character at position %d\n", i*2);
+            return -1;
+        }
+        
+        output[i] = (unsigned char)val;
+    }
+    
+    return byteLen;
+}
+
+/*
 ** 实现sqlite3_activate_cerod函数，用于通过PRAGMA激活CCVFS
 ** 这是SQLite shell调用的标准激活函数
+** zParms: 16进制字符串格式的密码 (例如: "48656c6c6f576f726c64")
 */
 void sqlite3_activate_cerod(const char *zParms) {
-    char *zCompressType = NULL;
-    char *zEncryptType = NULL;
-    char *zCopy = NULL;
+    char *zCompressType = "zlib";  /* 默认使用zlib压缩 */
+    char *zEncryptType = "xor";    /* 默认使用xor加密 */
     int rc = SQLITE_OK;
     static int activation_count = 0;
+    unsigned char keyBytes[32];    /* 支持最大32字节密钥 */
+    int keyLen;
 
     activation_count++;
 
     printf("activate\n");
     
-    /* 如果没有参数，使用默认配置 */
+    /* 解析16进制密码参数 */
     if (!zParms || strlen(zParms) == 0) {
-        zCompressType = "zlib";
-        zEncryptType = NULL;
-        printf("CCVFS: Using default compression (zlib), no encryption\n");
+        printf("CCVFS: No password provided, using default key\n");
+        /* 使用默认密钥 */
+        strcpy((char*)keyBytes, "default_key_123");
+        keyLen = 16;
     } else {
-        zCopy = sqlite3_mprintf("%s", zParms);
-        if (!zCopy) {
-            printf("CCVFS: Memory allocation failed\n");
+        printf("CCVFS: Parsing hex password: %s\n", zParms);
+        
+        /* 将16进制字符串解析为字节数组 */
+        keyLen = hex_string_to_bytes(zParms, keyBytes, sizeof(keyBytes));
+        if (keyLen < 0) {
+            printf("CCVFS: Failed to parse hex password\n");
             return;
         }
         
-        /* 解析参数，支持多种格式：
-         * - "compress_type" (仅压缩)
-         * - "compress_type:encrypt_type" (压缩+加密)
-         * - ":encrypt_type" (仅加密)
-         * - "none" (禁用压缩和加密)
-         */
-        if (strcmp(zCopy, "none") == 0) {
-            zCompressType = NULL;
-            zEncryptType = NULL;
-            printf("CCVFS: Disabled compression and encryption\n");
-        } else {
-            char *colon = strchr(zCopy, ':');
-            if (colon) {
-                *colon = '\0';
-                if (strlen(zCopy) > 0) {
-                    zCompressType = zCopy;
-                }
-                if (strlen(colon + 1) > 0) {
-                    zEncryptType = colon + 1;
-                }
-            } else {
-                zCompressType = zCopy;
-                zEncryptType = NULL;
-            }
+        if (keyLen < 16) {
+            printf("CCVFS: Warning: Key length (%d) is less than recommended 16 bytes\n", keyLen);
         }
         
-        printf("CCVFS: Activating with compression=%s, encryption=%s\n", 
-               zCompressType ? zCompressType : "none",
-               zEncryptType ? zEncryptType : "none");
+        printf("CCVFS: Parsed %d bytes from hex string\n", keyLen);
     }
+    
+    /* 设置全局加密密钥 */
+    ccvfs_set_encryption_key(keyBytes, keyLen);
     
     /* 激活CCVFS */
     rc = sqlite3_activate_ccvfs(zCompressType, zEncryptType);
     if (rc == SQLITE_OK) {
-        printf("CCVFS: Successfully activated (attempt #%d)\n", activation_count);
+        printf("CCVFS: Successfully activated with compression=%s, encryption=%s (attempt #%d)\n", 
+               zCompressType ? zCompressType : "none",
+               zEncryptType ? zEncryptType : "none",
+               activation_count);
     } else {
         printf("CCVFS: Activation failed with error code %d\n", rc);
         /* 提供更详细的错误信息 */
@@ -174,8 +201,7 @@ void sqlite3_activate_cerod(const char *zParms) {
         }
     }
     
-    if (zCopy) {
-        sqlite3_free(zCopy);
-    }
+    /* 清除栈上的密钥副本以提高安全性 */
+    memset(keyBytes, 0, sizeof(keyBytes));
 }
 

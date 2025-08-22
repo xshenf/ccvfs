@@ -1,6 +1,40 @@
 #include "ccvfs_core.h"
 #include "ccvfs_algorithm.h"
 
+#include <string.h>
+
+/* 全局变量存储解析后的密钥 */
+static unsigned char g_encryption_key[32];  /* 支持最大32字节密钥 */
+static int g_key_length = 0;
+static int g_key_set = 0;
+
+/*
+** 设置全局加密密钥
+*/
+void ccvfs_set_encryption_key(const unsigned char *key, int keyLen) {
+    if (key && keyLen > 0 && keyLen <= sizeof(g_encryption_key)) {
+        memcpy(g_encryption_key, key, keyLen);
+        g_key_length = keyLen;
+        g_key_set = 1;
+    } else {
+        g_key_set = 0;
+        g_key_length = 0;
+    }
+}
+
+/*
+** 获取全局加密密钥
+*/
+int ccvfs_get_encryption_key(unsigned char *key, int maxLen) {
+    if (!g_key_set || !key) {
+        return 0;
+    }
+
+    int copyLen = (g_key_length > maxLen) ? maxLen : g_key_length;
+    memcpy(key, g_encryption_key, copyLen);
+    return copyLen;
+}
+
 // ============================================================================
 // PUBLIC API IMPLEMENTATION
 // ============================================================================

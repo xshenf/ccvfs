@@ -346,6 +346,13 @@ int sqlite3_ccvfs_get_buffer_stats(
 int sqlite3_ccvfs_flush_write_buffer(sqlite3 *db);
 
 /*
+ * 全局密钥管理函数
+ * Set and get encryption key for CCVFS
+ */
+void ccvfs_set_encryption_key(const unsigned char *key, int keyLen);
+int ccvfs_get_encryption_key(unsigned char *key, int maxLen);
+
+/*
  * Convenience macro for backward compatibility
  * Creates VFS with default 64KB page size
  */
