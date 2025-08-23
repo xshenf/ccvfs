@@ -1,4 +1,5 @@
 #include "ccvfs.h"
+#include "ccvfs_internal.h"
 #include "sqlite3.h"
 #include <stdio.h>
 #include <stdlib.h>

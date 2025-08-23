@@ -1,3 +1,4 @@
+#include "ccvfs_algorithm.h"
 #include "unit_test_framework.h"
 
 // Test function declarations

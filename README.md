@@ -46,11 +46,11 @@
 ### 基本用法
 
 ```c
-#include "compress_vfs.h"
+#include "ccvfs.h"
 
 int main() {
     // 注册压缩加密VFS
-    sqlite3_ccvfs_create("ccvfs", NULL, "zlib", "aes-256");
+    sqlite3_ccvfs_create("ccvfs", NULL, "zlib", "aes256", 0, 0);
     
     // 使用压缩加密VFS打开数据库
     sqlite3 *db;
@@ -104,7 +104,7 @@ static CompressAlgorithm my_algorithm = {
 };
 
 // 在创建VFS时使用自定义算法
-sqlite3_ccvfs_create("ccvfs", NULL, "my_algorithm", "aes-256");
+sqlite3_ccvfs_create("ccvfs", NULL, "my_algorithm", "aes256", 0, 0);
 ```
 
 #### 自定义加密算法
@@ -180,36 +180,25 @@ CCVFS提供了多个调试信息级别：
 
 ### 压缩算法
 
-1. **RLE (Run-Length Encoding)**
-   - 最简单的压缩算法
-   - 适合有大量重复数据的场景
-
-2. **LZ4**
-   - 高性能压缩算法
-   - 压缩比适中，速度极快
-
-3. **Zlib**
+1. **Zlib**
    - 广泛使用的压缩算法
    - 压缩比较高，速度中等
+   - 需要链接zlib库
+   - 通过HAVE_ZLIB宏控制编译
 
 ### 加密算法
 
-1. **AES-128**
-   - 128位密钥长度
-   - 安全性较高，性能良好
-
-2. **AES-256**
+1. **AES-256-CBC**
    - 256位密钥长度
+   - 高级加密标准
    - 更高的安全性
-
-3. **ChaCha20**
-   - 现代流加密算法
-   - 在移动设备上性能优异
+   - 需要链接OpenSSL库
+   - 通过HAVE_OPENSSL宏控制编译
 
 ## 性能考虑
 
-1. **压缩率 vs 性能**：高压缩率算法通常需要更多CPU时间
-2. **加密开销**：加密会增加CPU开销，但提供数据安全保障
+1. **压缩效果 vs 性能**：zlib算法提供好的压缩效果，但需要更多CPU时间
+2. **加密开销**：AES-256加密会增加CPU开销，但提供数据安全保障
 3. **块大小优化**：合理设置数据块大小以平衡内存使用和性能
 4. **缓存策略**：实现智能缓存减少重复编解码操作
 
@@ -231,10 +220,15 @@ cmake ..
 make
 ```
 
+系统会自动检测可用的算法库：
+- 如果找到zlib，会定义HAVE_ZLIB宏并链接zlib库
+- 如果找到OpenSSL，会定义HAVE_OPENSSL宏并链接OpenSSL库
+
 ### 依赖项
 
 - SQLite3 开发库
-- 可选：zlib、lz4、openssl 等算法库
+- zlib 压缩库（可选，通过HAVE_ZLIB宏控制）
+- OpenSSL 加密库（可选，通过HAVE_OPENSSL宏控制）
 
 ## API 参考
 
@@ -245,8 +239,10 @@ make
 int sqlite3_ccvfs_create(
     const char *zVfsName,      // VFS名称
     sqlite3_vfs *pRootVfs,     // 底层VFS（NULL表示使用默认VFS）
-    const char *zCompressType, // 压缩算法类型
-    const char *zEncryptType   // 加密算法类型
+    const char *zCompressType, // 压缩算法类型（"zlib"或NULL）
+    const char *zEncryptType,  // 加密算法类型（"aes256"或NULL）
+    uint32_t pageSize,         // 页面大小（0表示使用默认64KB）
+    uint32_t flags             // 创建标志
 );
 
 // 销毁压缩加密VFS
@@ -265,7 +261,8 @@ int sqlite3_ccvfs_register_encrypt_algorithm(EncryptAlgorithm *algorithm);
 2. 加密数据库不能直接用普通SQLite工具打开
 3. 压缩和加密会增加CPU使用率
 4. 需要妥善保管加密密钥
-5. 某些SQLite特性可能不完全兼容（如在线备份）
+5. 仅支持内置zlib和OpenSSL算法，不再支持LZ4、LZMA等其他算法
+6. 某些SQLite特性可能不完全兼容（如在线备份）
 
 ## 故障排除
 
