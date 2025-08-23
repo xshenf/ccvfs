@@ -983,10 +983,41 @@ int sqlite3_ccvfs_generate_database(const GeneratorConfig *external_config) {
     int rc;
     
     if (config.use_compression) {
+        // Map string algorithms to algorithm pointers
+        const CompressAlgorithm *pCompressAlg = NULL;
+        const EncryptAlgorithm *pEncryptAlg = NULL;
+        
+        if (config.compress_algorithm && strcmp(config.compress_algorithm, "zlib") == 0) {
+#ifdef HAVE_ZLIB
+            pCompressAlg = CCVFS_COMPRESS_ZLIB;
+#else
+            fprintf(stderr, "Error: ZLIB compression algorithm not compiled\n");
+            return SQLITE_ERROR;
+#endif
+        }
+        
+        if (config.encrypt_algorithm) {
+            if (strcmp(config.encrypt_algorithm, "aes128") == 0) {
+#ifdef HAVE_OPENSSL
+                pEncryptAlg = CCVFS_ENCRYPT_AES128;
+#else
+                fprintf(stderr, "Error: AES128 encryption algorithm not compiled\n");
+                return SQLITE_ERROR;
+#endif
+            } else if (strcmp(config.encrypt_algorithm, "aes256") == 0) {
+#ifdef HAVE_OPENSSL
+                pEncryptAlg = CCVFS_ENCRYPT_AES256;
+#else
+                fprintf(stderr, "Error: AES256 encryption algorithm not compiled\n");
+                return SQLITE_ERROR;
+#endif
+            }
+        }
+        
         // Create CCVFS for compression
         rc = sqlite3_ccvfs_create("generator_vfs", NULL, 
-                                  config.compress_algorithm, 
-                                  config.encrypt_algorithm,
+                                  pCompressAlg, 
+                                  pEncryptAlg,
                                   config.page_size,
                                   CCVFS_CREATE_OFFLINE);
         if (rc != SQLITE_OK) {

@@ -68,14 +68,14 @@ target_compile_definitions(sqlitecc PRIVATE SQLITE_ENABLE_CEROD=1)
 
 # 根据用户选择的算法添加支持
 if(ENABLE_ZLIB AND ZLIB_FOUND)
-    target_compile_definitions(sqlitecc PRIVATE HAVE_ZLIB)
+    add_compile_definitions(HAVE_ZLIB)
     target_link_libraries(sqlitecc ZLIB::ZLIB)
     message(STATUS "Zlib compression algorithm enabled")
 endif()
 
 if(ENABLE_OPENSSL AND OpenSSL_FOUND)
+    add_compile_definitions(HAVE_OPENSSL)
     target_link_libraries(sqlitecc OpenSSL::SSL OpenSSL::Crypto)
-    target_compile_definitions(sqlitecc PRIVATE HAVE_OPENSSL)
     message(STATUS "OpenSSL encryption algorithms enabled")
 endif()
 

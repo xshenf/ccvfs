@@ -88,8 +88,39 @@ int sqlite3_ccvfs_compress_database(
     
     printf("源文件大小: %ld 字节\n", source_size);
     
+    // Map string algorithms to algorithm pointers
+    const CompressAlgorithm *pCompressAlg = NULL;
+    const EncryptAlgorithm *pEncryptAlg = NULL;
+    
+    if (compress_algorithm && strcmp(compress_algorithm, "zlib") == 0) {
+#ifdef HAVE_ZLIB
+        pCompressAlg = CCVFS_COMPRESS_ZLIB;
+#else
+        printf("错误: ZLIB压缩算法未编译\n");
+        return SQLITE_ERROR;
+#endif
+    }
+    
+    if (encrypt_algorithm) {
+        if (strcmp(encrypt_algorithm, "aes128") == 0) {
+#ifdef HAVE_OPENSSL
+            pEncryptAlg = CCVFS_ENCRYPT_AES128;
+#else
+            printf("错误: AES128加密算法未编译\n");
+            return SQLITE_ERROR;
+#endif
+        } else if (strcmp(encrypt_algorithm, "aes256") == 0) {
+#ifdef HAVE_OPENSSL
+            pEncryptAlg = CCVFS_ENCRYPT_AES256;
+#else
+            printf("错误: AES256加密算法未编译\n");
+            return SQLITE_ERROR;
+#endif
+        }
+    }
+    
     // Create CCVFS for compression
-    rc = sqlite3_ccvfs_create("compress_vfs", NULL, compress_algorithm, encrypt_algorithm, 
+    rc = sqlite3_ccvfs_create("compress_vfs", NULL, pCompressAlg, pEncryptAlg, 
                               0, CCVFS_CREATE_OFFLINE);
     if (rc != SQLITE_OK) {
         printf("错误: 创建压缩VFS失败: %d\n", rc);
@@ -293,7 +324,38 @@ int sqlite3_ccvfs_decompress_database(
            compress_alg ? compress_alg : "无", 
            encrypt_alg ? encrypt_alg : "无");
     
-    rc = sqlite3_ccvfs_create("decompress_vfs", NULL, compress_alg, encrypt_alg, 0, 0);
+    // Map string algorithms to algorithm pointers
+    const CompressAlgorithm *pCompressAlg = NULL;
+    const EncryptAlgorithm *pEncryptAlg = NULL;
+    
+    if (compress_alg && strcmp(compress_alg, "zlib") == 0) {
+#ifdef HAVE_ZLIB
+        pCompressAlg = CCVFS_COMPRESS_ZLIB;
+#else
+        printf("错误: ZLIB压缩算法未编译\n");
+        return SQLITE_ERROR;
+#endif
+    }
+    
+    if (encrypt_alg) {
+        if (strcmp(encrypt_alg, "aes128") == 0) {
+#ifdef HAVE_OPENSSL
+            pEncryptAlg = CCVFS_ENCRYPT_AES128;
+#else
+            printf("错误: AES128加密算法未编译\n");
+            return SQLITE_ERROR;
+#endif
+        } else if (strcmp(encrypt_alg, "aes256") == 0) {
+#ifdef HAVE_OPENSSL
+            pEncryptAlg = CCVFS_ENCRYPT_AES256;
+#else
+            printf("错误: AES256加密算法未编译\n");
+            return SQLITE_ERROR;
+#endif
+        }
+    }
+    
+    rc = sqlite3_ccvfs_create("decompress_vfs", NULL, pCompressAlg, pEncryptAlg, 0, 0);
     if (rc != SQLITE_OK) {
         printf("错误: 创建解压VFS失败: %d\n", rc);
         return rc;
@@ -447,11 +509,12 @@ cleanup:
  * This function is called by SQLite shell to activate compression/encryption
  */
 void sqlite3_activate_cerod(const char *zParms) {
-    char *zCompressType = NULL;
-    char *zEncryptType = NULL;
     char *zCopy = NULL;
     int rc = SQLITE_OK;
     static int activation_count = 0;
+    const CompressAlgorithm *pCompressAlg = NULL;
+    const EncryptAlgorithm *pEncryptAlg = NULL;
+    
     activation_count++;
     
     if (zParms && *zParms) {
@@ -462,6 +525,8 @@ void sqlite3_activate_cerod(const char *zParms) {
         }
         
         // Parse parameters: "compression:encryption" or "compression"
+        char *zCompressType = NULL;
+        char *zEncryptType = NULL;
         char *zSep = strchr(zCopy, ':');
         if (zSep) {
             *zSep = '\0';
@@ -478,13 +543,45 @@ void sqlite3_activate_cerod(const char *zParms) {
             if (strcmp(zCompressType, "none") == 0) zCompressType = NULL;
         }
         
+        // Map compression algorithm names to pointers
+        if (zCompressType) {
+#ifdef HAVE_ZLIB
+            if (strcmp(zCompressType, "zlib") == 0) {
+                pCompressAlg = CCVFS_COMPRESS_ZLIB;
+            }
+#endif
+            if (!pCompressAlg) {
+                printf("CCVFS: Unknown compression algorithm: %s\n", zCompressType);
+            }
+        }
+        
+        // Map encryption algorithm names to pointers
+        if (zEncryptType) {
+#ifdef HAVE_OPENSSL
+            if (strcmp(zEncryptType, "aes128") == 0) {
+                pEncryptAlg = CCVFS_ENCRYPT_AES128;
+            } else if (strcmp(zEncryptType, "aes256") == 0) {
+                pEncryptAlg = CCVFS_ENCRYPT_AES256;
+            }
+#endif
+            if (!pEncryptAlg) {
+                printf("CCVFS: Unknown encryption algorithm: %s\n", zEncryptType);
+            }
+        }
+        
         printf("CCVFS: Activating with compression=%s, encryption=%s\n", 
-               zCompressType ? zCompressType : "none",
-               zEncryptType ? zEncryptType : "none");
+               pCompressAlg ? pCompressAlg->name : "none",
+               pEncryptAlg ? pEncryptAlg->name : "none");
+    } else {
+        // Default: use zlib compression if available
+#ifdef HAVE_ZLIB
+        pCompressAlg = CCVFS_COMPRESS_ZLIB;
+#endif
+        printf("CCVFS: Activating with default settings\n");
     }
     
     // Activate CCVFS
-    rc = sqlite3_activate_ccvfs(zCompressType, zEncryptType);
+    rc = sqlite3_activate_ccvfs(pCompressAlg, pEncryptAlg);
     if (rc == SQLITE_OK) {
         printf("CCVFS: Successfully activated (attempt #%d)\n", activation_count);
     } else {
@@ -563,9 +660,40 @@ int sqlite3_ccvfs_compress_database_with_page_size(
     
     printf("源文件大小: %ld 字节\n", source_size);
     
+    // Map string algorithms to algorithm pointers
+    const CompressAlgorithm *pCompressAlg = NULL;
+    const EncryptAlgorithm *pEncryptAlg = NULL;
+    
+    if (compress_algorithm && strcmp(compress_algorithm, "zlib") == 0) {
+#ifdef HAVE_ZLIB
+        pCompressAlg = CCVFS_COMPRESS_ZLIB;
+#else
+        printf("错误: ZLIB压缩算法未编译\n");
+        return SQLITE_ERROR;
+#endif
+    }
+    
+    if (encrypt_algorithm) {
+        if (strcmp(encrypt_algorithm, "aes128") == 0) {
+#ifdef HAVE_OPENSSL
+            pEncryptAlg = CCVFS_ENCRYPT_AES128;
+#else
+            printf("错误: AES128加密算法未编译\n");
+            return SQLITE_ERROR;
+#endif
+        } else if (strcmp(encrypt_algorithm, "aes256") == 0) {
+#ifdef HAVE_OPENSSL
+            pEncryptAlg = CCVFS_ENCRYPT_AES256;
+#else
+            printf("错误: AES256加密算法未编译\n");
+            return SQLITE_ERROR;
+#endif
+        }
+    }
+    
     // Create CCVFS for compression with custom page size
     rc = sqlite3_ccvfs_create("compress_vfs_custom", NULL, 
-                              compress_algorithm, encrypt_algorithm, 
+                              pCompressAlg, pEncryptAlg, 
                               page_size, CCVFS_CREATE_OFFLINE);
     if (rc != SQLITE_OK) {
         printf("错误: 创建压缩VFS失败: %d\n", rc);

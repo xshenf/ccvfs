@@ -580,7 +580,11 @@ static int perform_batch_test(const char *db_path, int enable_batch,
 
     // Create CCVFS if it doesn't exist
     sqlite3_vfs *pDefaultVfs = sqlite3_vfs_find(NULL);
-    rc = sqlite3_ccvfs_create("ccvfs", pDefaultVfs, "zlib", NULL, 0, 0);
+#ifdef HAVE_ZLIB
+    rc = sqlite3_ccvfs_create("ccvfs", pDefaultVfs, CCVFS_COMPRESS_ZLIB, NULL, 0, 0);
+#else
+    rc = sqlite3_ccvfs_create("ccvfs", pDefaultVfs, NULL, NULL, 0, 0);
+#endif
     if (rc != SQLITE_OK && rc != SQLITE_MISUSE) {
         // SQLITE_MISUSE means already exists
         fprintf(stderr, "创建 CCVFS 失败，错误代码: %d\n", rc);
@@ -712,7 +716,11 @@ static int perform_database_compare(const char *db1_path, const char *db2_path, 
     sqlite3_initialize();
     
     // Register CCVFS for handling compressed databases
-    int rc = sqlite3_ccvfs_create("ccvfs", NULL, "zlib", NULL, 0, 0);
+#ifdef HAVE_ZLIB
+    int rc = sqlite3_ccvfs_create("ccvfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 0, 0);
+#else
+    int rc = sqlite3_ccvfs_create("ccvfs", NULL, NULL, NULL, 0, 0);
+#endif
     if (rc != SQLITE_OK && verbose) {
         printf("Note: CCVFS registration failed (code %d) - compressed databases may not work\n", rc);
     }

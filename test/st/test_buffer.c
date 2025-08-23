@@ -19,7 +19,11 @@ int test_batch_write_buffer(TestResult* result) {
     init_test_algorithms();
     
     // Create VFS with write buffering
-    int rc = sqlite3_ccvfs_create("buffer_vfs", NULL, "zlib", NULL, 4096, CCVFS_CREATE_REALTIME);
+#ifdef HAVE_ZLIB
+    int rc = sqlite3_ccvfs_create("buffer_vfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 4096, CCVFS_CREATE_REALTIME);
+#else
+    int rc = sqlite3_ccvfs_create("buffer_vfs", NULL, NULL, NULL, 4096, CCVFS_CREATE_REALTIME);
+#endif
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "VFS creation failed: %d", rc);
         return 0;
@@ -171,7 +175,11 @@ int test_simple_buffer(TestResult* result) {
     init_test_algorithms();
     
     // Create VFS
-    int rc = sqlite3_ccvfs_create("simple_buffer_vfs", NULL, "zlib", NULL, 4096, CCVFS_CREATE_REALTIME);
+#ifdef HAVE_ZLIB
+    int rc = sqlite3_ccvfs_create("simple_buffer_vfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 4096, CCVFS_CREATE_REALTIME);
+#else
+    int rc = sqlite3_ccvfs_create("simple_buffer_vfs", NULL, NULL, NULL, 4096, CCVFS_CREATE_REALTIME);
+#endif
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "VFS creation failed: %d", rc);
         return 0;

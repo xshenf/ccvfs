@@ -47,8 +47,8 @@ int ccvfs_get_encryption_key(unsigned char *key, int maxLen) {
 int sqlite3_ccvfs_create(
     const char *zVfsName,
     sqlite3_vfs *pRootVfs,
-    const char *zCompressType,
-    const char *zEncryptType,
+    const CompressAlgorithm *pCompressAlg,
+    const EncryptAlgorithm *pEncryptAlg,
     uint32_t pageSize,
     uint32_t flags
 ) {
@@ -76,8 +76,10 @@ int sqlite3_ccvfs_create(
     }
     
     CCVFS_DEBUG("Creating CCVFS: name=%s, compression=%s, encryption=%s, page_size=%u, flags=0x%x",
-                zVfsName, zCompressType ? zCompressType : "(none)", 
-                zEncryptType ? zEncryptType : "(none)", pageSize, flags);
+                zVfsName, 
+                pCompressAlg ? pCompressAlg->name : "(none)", 
+                pEncryptAlg ? pEncryptAlg->name : "(none)", 
+                pageSize, flags);
     
     // Initialize builtin algorithms
     ccvfs_init_builtin_algorithms();
@@ -98,11 +100,9 @@ int sqlite3_ccvfs_create(
         }
     }
     
-    // Calculate memory needed
+    // Calculate memory needed (no need to store algorithm names)
     nName = (int)strlen(zVfsName) + 1;
     nByte = sizeof(CCVFS) + nName;
-    if (zCompressType) nByte += (int)strlen(zCompressType) + 1;
-    if (zEncryptType) nByte += (int)strlen(zEncryptType) + 1;
     
     // Allocate memory
     pNew = (CCVFS*)sqlite3_malloc(nByte);
@@ -141,10 +141,10 @@ int sqlite3_ccvfs_create(
     // Set CCVFS specific data
     pNew->pRootVfs = pRootVfs;
     pNew->creation_flags = flags;
-    pNew->page_size = pageSize;  // Use the validated page size
+    pNew->page_size = pageSize;
     
     // Initialize hole detection configuration with defaults
-    pNew->enable_hole_detection = 1;  // Enable by default
+    pNew->enable_hole_detection = 1;
     pNew->max_holes = CCVFS_DEFAULT_MAX_HOLES;
     pNew->min_hole_size = CCVFS_DEFAULT_MIN_HOLE_SIZE;
     
@@ -155,38 +155,20 @@ int sqlite3_ccvfs_create(
     pNew->auto_flush_pages = CCVFS_DEFAULT_AUTO_FLUSH_PAGES;
     
     // Initialize data integrity configuration with defaults
-    pNew->strict_checksum_mode = 1;    // Strict mode by default
-    pNew->enable_data_recovery = 0;    // Disabled by default for safety
-    pNew->corruption_tolerance = 0;    // Zero tolerance by default
+    pNew->strict_checksum_mode = 1;
+    pNew->enable_data_recovery = 0;
+    pNew->corruption_tolerance = 0;
     
-    // Copy algorithm names
-    char *pDest = (char*)&pNew[1] + nName;
+    // Directly assign algorithm pointers (much more efficient!)
+    pNew->pCompressAlg = (CompressAlgorithm*)pCompressAlg;
+    pNew->pEncryptAlg = (EncryptAlgorithm*)pEncryptAlg;
     
-    if (zCompressType) {
-        pNew->zCompressType = pDest;
-        strcpy(pDest, zCompressType);
-        pDest += strlen(zCompressType) + 1;
-        
-        // Find compression algorithm
-        pNew->pCompressAlg = ccvfs_find_compress_algorithm(zCompressType);
-        if (!pNew->pCompressAlg) {
-            CCVFS_ERROR("Compression algorithm not found: %s", zCompressType);
-            sqlite3_free(pNew);
-            return SQLITE_ERROR;
-        }
+    // Store algorithm names for compatibility (optional)
+    if (pCompressAlg) {
+        pNew->zCompressType = pCompressAlg->name;
     }
-    
-    if (zEncryptType) {
-        pNew->zEncryptType = pDest;
-        strcpy(pDest, zEncryptType);
-        
-        // Find encryption algorithm
-        pNew->pEncryptAlg = ccvfs_find_encrypt_algorithm(zEncryptType);
-        if (!pNew->pEncryptAlg) {
-            CCVFS_ERROR("Encryption algorithm not found: %s", zEncryptType);
-            sqlite3_free(pNew);
-            return SQLITE_ERROR;
-        }
+    if (pEncryptAlg) {
+        pNew->zEncryptType = pEncryptAlg->name;
     }
     
     // Register VFS
@@ -373,20 +355,20 @@ int sqlite3_ccvfs_flush_write_buffer(sqlite3 *db) {
 /*
  * Activate CCVFS (similar to sqlite3_activate_cerod)
  */
-int sqlite3_activate_ccvfs(const char *zCompressType, const char *zEncryptType) {
+int sqlite3_activate_ccvfs(const CompressAlgorithm *pCompressAlg, const EncryptAlgorithm *pEncryptAlg) {
     static int isActivated = 0;
     int rc;
     
     CCVFS_DEBUG("Activating CCVFS: compression=%s, encryption=%s", 
-                zCompressType ? zCompressType : "(none)", 
-                zEncryptType ? zEncryptType : "(none)");
+                pCompressAlg ? pCompressAlg->name : "(none)", 
+                pEncryptAlg ? pEncryptAlg->name : "(none)");
     
     if (isActivated) {
         CCVFS_INFO("CCVFS already activated");
         return SQLITE_OK;
     }
     
-    rc = sqlite3_ccvfs_create("ccvfs", NULL, zCompressType, zEncryptType, 0, CCVFS_CREATE_REALTIME);
+    rc = sqlite3_ccvfs_create("ccvfs", NULL, pCompressAlg, pEncryptAlg, 0, CCVFS_CREATE_REALTIME);
     if (rc != SQLITE_OK) {
         CCVFS_ERROR("Failed to activate CCVFS: %d", rc);
         return rc;

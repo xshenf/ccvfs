@@ -19,7 +19,11 @@ int test_hole_detection(TestResult* result) {
     init_test_algorithms();
     
     // Create VFS with hole detection enabled
-    int rc = sqlite3_ccvfs_create("hole_vfs", NULL, "zlib", NULL, 4096, CCVFS_CREATE_REALTIME);
+#ifdef HAVE_ZLIB
+    int rc = sqlite3_ccvfs_create("hole_vfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 4096, CCVFS_CREATE_REALTIME);
+#else
+    int rc = sqlite3_ccvfs_create("hole_vfs", NULL, NULL, NULL, 4096, CCVFS_CREATE_REALTIME);
+#endif
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "VFS creation failed: %d", rc);
         return 0;
@@ -209,7 +213,11 @@ int test_simple_hole(TestResult* result) {
     init_test_algorithms();
     
     // Create VFS
-    int rc = sqlite3_ccvfs_create("simple_hole_vfs", NULL, "zlib", NULL, 4096, CCVFS_CREATE_REALTIME);
+#ifdef HAVE_ZLIB
+    int rc = sqlite3_ccvfs_create("simple_hole_vfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 4096, CCVFS_CREATE_REALTIME);
+#else
+    int rc = sqlite3_ccvfs_create("simple_hole_vfs", NULL, NULL, NULL, 4096, CCVFS_CREATE_REALTIME);
+#endif
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "VFS creation failed: %d", rc);
         return 0;

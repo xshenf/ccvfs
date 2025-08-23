@@ -138,14 +138,18 @@ ctest --output-on-failure # Show output on failure
 - **Encryption**: XOR (simple), AES-128, AES-256, ChaCha20
 
 ### Custom Algorithm Registration
-Use `sqlite3_ccvfs_register_compress_algorithm()` and `sqlite3_ccvfs_register_encrypt_algorithm()` to register custom implementations following the `CompressAlgorithm` and `EncryptAlgorithm` interfaces.
+Users can define custom algorithms by creating CompressAlgorithm and EncryptAlgorithm structures and passing them directly to `sqlite3_ccvfs_create()` following the interfaces.
 
 ## Usage Patterns
 
 ### Basic VFS Creation
 ```c
 // Create VFS with specific algorithms
-sqlite3_ccvfs_create("ccvfs", NULL, "rle", "xor");
+#ifdef HAVE_ZLIB
+sqlite3_ccvfs_create("ccvfs", NULL, CCVFS_COMPRESS_ZLIB, NULL);
+#else
+sqlite3_ccvfs_create("ccvfs", NULL, NULL, NULL);
+#endif
 
 // Open database with custom VFS
 sqlite3_open_v2("test.db", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "ccvfs");

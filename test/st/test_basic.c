@@ -19,7 +19,11 @@ int test_vfs_connection(TestResult* result) {
     init_test_algorithms();
     
     // Create VFS
-    int rc = sqlite3_ccvfs_create("test_vfs", NULL, "zlib", NULL, 4096, CCVFS_CREATE_REALTIME);
+#ifdef HAVE_ZLIB
+    int rc = sqlite3_ccvfs_create("test_vfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 4096, CCVFS_CREATE_REALTIME);
+#else
+    int rc = sqlite3_ccvfs_create("test_vfs", NULL, NULL, NULL, 4096, CCVFS_CREATE_REALTIME);
+#endif
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "VFS creation failed: %d", rc);
         return 0;
@@ -227,7 +231,11 @@ int test_large_db_stress(TestResult* result) {
     init_test_algorithms();
     
     // Create VFS
-    int rc = sqlite3_ccvfs_create("stress_vfs", NULL, "zlib", NULL, 65536, CCVFS_CREATE_REALTIME);
+#ifdef HAVE_ZLIB
+    int rc = sqlite3_ccvfs_create("stress_vfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 65536, CCVFS_CREATE_REALTIME);
+#else
+    int rc = sqlite3_ccvfs_create("stress_vfs", NULL, NULL, NULL, 65536, CCVFS_CREATE_REALTIME);
+#endif
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "VFS creation failed: %d", rc);
         return 0;
@@ -306,7 +314,11 @@ int test_simple_large(TestResult* result) {
     init_test_algorithms();
     
     // Create VFS
-    int rc = sqlite3_ccvfs_create("large_vfs", NULL, "zlib", NULL, 65536, CCVFS_CREATE_REALTIME);
+#ifdef HAVE_ZLIB
+    int rc = sqlite3_ccvfs_create("large_vfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 65536, CCVFS_CREATE_REALTIME);
+#else
+    int rc = sqlite3_ccvfs_create("large_vfs", NULL, NULL, NULL, 65536, CCVFS_CREATE_REALTIME);
+#endif
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "VFS creation failed: %d", rc);
         return 0;
@@ -460,7 +472,11 @@ int test_large_db_compression_integrity(TestResult* result) {
     // Step 3: Read compressed database and verify integrity
     printf("Verifying compressed database integrity...\n");
     init_test_algorithms();
-    rc = sqlite3_ccvfs_create("compress_vfs", NULL, "zlib", NULL, 4096, CCVFS_CREATE_REALTIME);
+#ifdef HAVE_ZLIB
+    rc = sqlite3_ccvfs_create("compress_vfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 4096, CCVFS_CREATE_REALTIME);
+#else
+    rc = sqlite3_ccvfs_create("compress_vfs", NULL, NULL, NULL, 4096, CCVFS_CREATE_REALTIME);
+#endif
     if (rc != SQLITE_OK) {
         snprintf(result->message, sizeof(result->message), "Compressed VFS creation failed: %d", rc);
         return 0;

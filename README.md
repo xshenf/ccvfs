@@ -50,7 +50,11 @@
 
 int main() {
     // 注册压缩加密VFS
-    sqlite3_ccvfs_create("ccvfs", NULL, "zlib", "aes256", 0, 0);
+#ifdef HAVE_ZLIB
+    sqlite3_ccvfs_create("ccvfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 0, CCVFS_CREATE_REALTIME);
+#else
+    sqlite3_ccvfs_create("ccvfs", NULL, NULL, NULL, 0, CCVFS_CREATE_REALTIME);
+#endif
     
     // 使用压缩加密VFS打开数据库
     sqlite3 *db;
@@ -104,7 +108,7 @@ static CompressAlgorithm my_algorithm = {
 };
 
 // 在创建VFS时使用自定义算法
-sqlite3_ccvfs_create("ccvfs", NULL, "my_algorithm", "aes256", 0, 0);
+sqlite3_ccvfs_create("ccvfs", NULL, &my_algorithm, NULL, 0, CCVFS_CREATE_REALTIME);
 ```
 
 #### 自定义加密算法
@@ -237,22 +241,19 @@ make
 ```c
 // 创建压缩加密VFS
 int sqlite3_ccvfs_create(
-    const char *zVfsName,      // VFS名称
-    sqlite3_vfs *pRootVfs,     // 底层VFS（NULL表示使用默认VFS）
-    const char *zCompressType, // 压缩算法类型（"zlib"或NULL）
-    const char *zEncryptType,  // 加密算法类型（"aes256"或NULL）
-    uint32_t pageSize,         // 页面大小（0表示使用默认64KB）
-    uint32_t flags             // 创建标志
+    const char *zVfsName,           // VFS名称
+    sqlite3_vfs *pRootVfs,          // 底层VFS（NULL表示使用默认VFS）
+    const CompressAlgorithm *pCompressAlg,  // 压缩算法（NULL表示无压缩）
+    const EncryptAlgorithm *pEncryptAlg,    // 加密算法（NULL表示无加密）
+    uint32_t pageSize,              // 页面大小（0表示使用默认64KB）
+    uint32_t flags                  // 创建标志
 );
 
 // 销毁压缩加密VFS
 int sqlite3_ccvfs_destroy(const char *zVfsName);
 
-// 注册自定义压缩算法
-int sqlite3_ccvfs_register_compress_algorithm(CompressAlgorithm *algorithm);
-
-// 注册自定义加密算法
-int sqlite3_ccvfs_register_encrypt_algorithm(EncryptAlgorithm *algorithm);
+// 激活CCVFS
+int sqlite3_activate_ccvfs(const CompressAlgorithm *pCompressAlg, const EncryptAlgorithm *pEncryptAlg);
 ```
 
 ## 限制和注意事项

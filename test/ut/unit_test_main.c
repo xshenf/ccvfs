@@ -14,11 +14,6 @@ static const UnitTestCase test_cases[] = {
         test_hex_key_parsing
     },
     {
-        "algorithm_registry", 
-        "Test compression and encryption algorithm registry",
-        test_algorithm_registry
-    },
-    {
         "encryption_key_mgmt",
         "Test encryption key management functions", 
         test_encryption_key_mgmt

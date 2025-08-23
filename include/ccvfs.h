@@ -73,23 +73,69 @@ typedef struct {
 } EncryptAlgorithm;
 
 /*
+ * Predefined algorithm constants for convenience
+ * These can be used with sqlite3_ccvfs_create_with_algorithms()
+ * 
+ * Built-in algorithms (controlled by compile-time macros):
+ * - CCVFS_COMPRESS_ZLIB: Available only when HAVE_ZLIB is defined
+ * - CCVFS_ENCRYPT_AES128/AES256: Available only when HAVE_OPENSSL is defined
+ * 
+ * For no compression/encryption, simply pass NULL.
+ * For other algorithms, users must define their own CompressAlgorithm 
+ * or EncryptAlgorithm structures and pass them directly.
+ */
+#ifdef HAVE_ZLIB
+extern const CompressAlgorithm *CCVFS_COMPRESS_ZLIB;   // ZLib compression
+#endif
+
+#ifdef HAVE_OPENSSL
+extern const EncryptAlgorithm *CCVFS_ENCRYPT_AES128;   // AES-128 encryption
+extern const EncryptAlgorithm *CCVFS_ENCRYPT_AES256;   // AES-256 encryption
+#endif
+
+/*
  * Register compression and encryption VFS module
  * Parameters:
  *   zVfsName - Name of the new VFS
  *   pRootVfs - Underlying VFS (usually the default VFS)
- *   zCompressType - Compression algorithm type
- *   zEncryptType - Encryption algorithm type
+ *   pCompressAlg - Compression algorithm (NULL for no compression)
+ *   pEncryptAlg - Encryption algorithm (NULL for no encryption)
  *   pageSize - Block size in bytes (1KB - 1MB), 0 for default (64KB)
  *   flags - Creation flags (CCVFS_CREATE_*)
  * Return value:
  *   SQLITE_OK - Success
  *   Other values - Error code
+ * 
+ * Example usage:
+ *   // Using built-in algorithms (if available)
+ *   #ifdef HAVE_ZLIB
+ *   sqlite3_ccvfs_create("my_vfs", NULL, 
+ *                         CCVFS_COMPRESS_ZLIB, 
+ *                         NULL,  // No encryption
+ *                         0, CCVFS_CREATE_REALTIME);
+ *   #endif
+ * 
+ *   // No compression, no encryption
+ *   sqlite3_ccvfs_create("simple_vfs", NULL, 
+ *                         NULL, NULL, 
+ *                         0, CCVFS_CREATE_REALTIME);
+ * 
+ *   // Using custom algorithm
+ *   CompressAlgorithm my_compress = {
+ *       .name = "my_algorithm",
+ *       .compress = my_compress_func,
+ *       .decompress = my_decompress_func,
+ *       .get_max_compressed_size = my_max_size_func
+ *   };
+ *   sqlite3_ccvfs_create("my_vfs", NULL, 
+ *                         &my_compress, NULL, 
+ *                         0, CCVFS_CREATE_REALTIME);
  */
 int sqlite3_ccvfs_create(
     const char *zVfsName,
     sqlite3_vfs *pRootVfs,
-    const char *zCompressType,
-    const char *zEncryptType,
+    const CompressAlgorithm *pCompressAlg,
+    const EncryptAlgorithm *pEncryptAlg,
     uint32_t pageSize,
     uint32_t flags
 );
@@ -100,19 +146,9 @@ int sqlite3_ccvfs_create(
 int sqlite3_ccvfs_destroy(const char *zVfsName);
 
 /*
- * Register custom compression algorithm
- */
-int sqlite3_ccvfs_register_compress_algorithm(CompressAlgorithm *algorithm);
-
-/*
- * Register custom encryption algorithm
- */
-int sqlite3_ccvfs_register_encrypt_algorithm(EncryptAlgorithm *algorithm);
-
-/*
  * Activate compression and encryption VFS, similar to sqlite3_activate_cerod
  */
-int sqlite3_activate_ccvfs(const char *zCompressType, const char *zEncryptType);
+int sqlite3_activate_ccvfs(const CompressAlgorithm *pCompressAlg, const EncryptAlgorithm *pEncryptAlg);
 
 /*
  * Compress an existing SQLite database (offline compression)
@@ -216,13 +252,6 @@ int sqlite3_ccvfs_flush_write_buffer(sqlite3 *db);
 void ccvfs_set_encryption_key(const unsigned char *key, int keyLen);
 
 int ccvfs_get_encryption_key(unsigned char *key, int maxLen);
-
-/*
- * Convenience macro for backward compatibility
- * Creates VFS with default 64KB page size
- */
-#define sqlite3_ccvfs_create_default(zVfsName, pRootVfs, zCompressType, zEncryptType, flags) \
-    sqlite3_ccvfs_create(zVfsName, pRootVfs, zCompressType, zEncryptType, 0, flags)
 
 #ifdef __cplusplus
 }  /* extern "C" */

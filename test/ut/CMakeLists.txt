@@ -16,7 +16,6 @@ add_executable(unit_tests
     unit_test_main.c
     unit_test_framework.c
     test_hex_key_parsing.c
-    test_algorithm_registry.c
     test_encryption_key_mgmt.c
 )
 
@@ -30,13 +29,6 @@ target_link_libraries(unit_tests sqlitecc)
 add_test(
     NAME UnitTest_Hex_Key_Parsing
     COMMAND unit_tests hex_key_parsing
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-# Algorithm Registry Test
-add_test(
-    NAME UnitTest_Algorithm_Registry
-    COMMAND unit_tests algorithm_registry
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -57,7 +49,6 @@ add_test(
 # Set test properties
 set_tests_properties(
     UnitTest_Hex_Key_Parsing
-    UnitTest_Algorithm_Registry
     UnitTest_Encryption_Key_Mgmt
     PROPERTIES
     TIMEOUT 60  # 1 minute timeout for each unit test
@@ -76,12 +67,6 @@ set_tests_properties(
     UnitTest_Encryption_Key_Mgmt
     PROPERTIES
     LABELS "Security"
-)
-
-set_tests_properties(
-    UnitTest_Algorithm_Registry
-    PROPERTIES
-    LABELS "Algorithm"
 )
 
 set_tests_properties(
