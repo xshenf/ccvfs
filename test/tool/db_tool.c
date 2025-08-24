@@ -26,6 +26,23 @@ extern int sqlite3_ccvfs_decompress_database(
 
 extern int sqlite3_ccvfs_get_stats(const char *compressed_db, CCVFSStats *stats);
 
+// Encryption/Decryption functions
+static int perform_encrypt_database(const char *source_db, const char *encrypted_db, 
+                                  const char *encrypt_algo, const char *key_hex, int verbose);
+static int perform_decrypt_database(const char *encrypted_db, const char *output_db, 
+                                  const char *key_hex, int verbose);
+static int perform_compress_encrypt_database(const char *source_db, const char *target_db, 
+                                           const char *compress_algo, const char *encrypt_algo,
+                                           const char *key_hex, uint32_t page_size, 
+                                           int compression_level, int verbose);
+static int perform_decrypt_decompress_database(const char *encrypted_file, const char *output_db,
+                                              const char *key_hex, int verbose);
+
+// Helper functions
+static int parse_hex_key(const char *hex_str, unsigned char *key, int max_len);
+static int parse_hex_key_for_algorithm(const char *hex_str, unsigned char *key, int max_len, const char *algorithm);
+static void print_hex_key(const unsigned char *key, int len);
+
 // Batch writer test functions
 static int perform_batch_test(const char *db_path, int enable_batch, 
                              int max_pages, int max_memory_mb, 
@@ -47,6 +64,10 @@ static void print_usage(const char *program_name) {
     printf("操作:\n");
     printf("  compress <源数据库> <目标文件>    压缩SQLite数据库\n");
     printf("  decompress <压缩文件> <输出文件>  解压数据库到标准SQLite格式\n");
+    printf("  encrypt <源数据库> <加密文件>    加密SQLite数据库\n");
+    printf("  decrypt <加密文件> <输出文件>    解密数据库到标准SQLite格式\n");
+    printf("  compress-encrypt <源数据库> <目标文件>  压缩并加密SQLite数据库\n");
+    printf("  decrypt-decompress <加密文件> <输出文件>  解密并解压SQLite数据库\n");
     printf("  info <压缩文件>                   显示压缩文件信息\n");
     printf("  generate <输出文件> <大小>        生成指定大小的测试数据库\n");
     printf("  compare <数据库1> <数据库2>       比较两个数据库\n");
@@ -56,11 +77,12 @@ static void print_usage(const char *program_name) {
 
     printf("通用选项:\n");
     printf("  -h, --help                       显示帮助信息\n");
-    printf("  -v, --verbose                    详细输出\n\n");
+    printf("  -v, --verbose                    详细输出\n");
+    printf("  -k, --key <密钥>                  加密密钥（十六进制格式，位数不足时自动补0）\n\n");
 
     printf("压缩/解压选项:\n");
     printf("  -c, --compress-algo <算法>       压缩算法 (rle, lz4, zlib)\n");
-    printf("  -e, --encrypt-algo <算法>        加密算法 (xor, aes128, aes256, chacha20)\n");
+    printf("  -e, --encrypt-algo <算法>        加密算法 (xor, aes128, aes256, chacha20, 默认: aes256)\n");
     printf("  -l, --level <等级>               压缩等级 (1-9, 默认: 6)\n");
     printf("  -b, --page-size <大小>          页大小 (1K, 4K, 8K, 16K, 32K, 64K, 128K, 256K, 512K, 1M, 默认: 64K)\n\n");
 
@@ -101,6 +123,11 @@ static void print_usage(const char *program_name) {
     printf("  %s compress -b 4K test.db test.ccvfs          # 使用4KB页大小\n", program_name);
     printf("  %s compress -b 1M -c zlib test.db test.ccvfs  # 使用1MB页大小\n", program_name);
     printf("  %s decompress test.ccvfs restored.db\n", program_name);
+    printf("  %s encrypt -k 123456 test.db encrypted.db     # 默认使用aes256加密\n", program_name);
+    printf("  %s encrypt -e aes128 -k ABCDEF test.db encrypted.db\n", program_name);
+    printf("  %s decrypt -k 123456 encrypted.db decrypted.db\n", program_name);
+    printf("  %s compress-encrypt -c zlib -k 123456 test.db secure.ccvfs  # 默认aes256\n", program_name);
+    printf("  %s decrypt-decompress -k 123456 secure.ccvfs restored.db\n", program_name);
     printf("  %s info test.ccvfs\n", program_name);
     printf("  %s generate test.db 100MB                     # 生成100MB测试数据库\n", program_name);
     printf("  %s generate -C -E aes128 test.ccvfs 500MB    # 生成500MB压缩加密数据库\n", program_name);
@@ -164,6 +191,7 @@ static void print_stats(const CCVFSStats *stats) {
 int main(int argc, char *argv[]) {
     const char *compress_algo = "zlib";
     const char *encrypt_algo = NULL; // Default to no encryption
+    const char *key_hex = NULL; // Encryption key in hex format
     int compression_level = 6;
     uint32_t page_size = 0; // Will be auto-detected from source database
     int verbose = 0;
@@ -185,6 +213,7 @@ int main(int argc, char *argv[]) {
     static struct option long_options[] = {
         {"compress-algo", required_argument, 0, 'c'},
         {"encrypt-algo", required_argument, 0, 'e'},
+        {"key", required_argument, 0, 'k'},
         {"level", required_argument, 0, 'l'},
         {"page-size", required_argument, 0, 'b'},
         {"batch-enable", no_argument, 0, 1000},
@@ -206,7 +235,7 @@ int main(int argc, char *argv[]) {
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "c:e:l:b:CE:siwt:vh", long_options, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "c:e:k:l:b:CE:siwt:vh", long_options, NULL)) != -1) {
         switch (c) {
             case 'c':
                 compress_algo = optarg;
@@ -216,6 +245,9 @@ int main(int argc, char *argv[]) {
                 if (strcmp(encrypt_algo, "none") == 0) {
                     encrypt_algo = NULL;
                 }
+                break;
+            case 'k':
+                key_hex = optarg;
                 break;
             case 'l':
                 compression_level = atoi(optarg);
@@ -342,6 +374,22 @@ int main(int argc, char *argv[]) {
         const char *source_db = argv[optind + 1];
         const char *target_db = argv[optind + 2];
 
+        // Set encryption key if provided
+        if (key_hex && encrypt_algo) {
+            unsigned char key[64];
+            int key_len = parse_hex_key(key_hex, key, sizeof(key));
+            if (key_len <= 0) {
+                fprintf(stderr, "错误: 无效的密钥格式\n");
+                return 1;
+            }
+            ccvfs_set_encryption_key(key, key_len);
+            if (verbose) {
+                printf("已设置加密密钥: ");
+                print_hex_key(key, key_len);
+                printf("\n");
+            }
+        }
+
         // Auto-detect page size from source database if not specified
         if (page_size == 0) {
             sqlite3 *db = NULL;
@@ -402,6 +450,22 @@ int main(int argc, char *argv[]) {
         const char *compressed_db = argv[optind + 1];
         const char *output_db = argv[optind + 2];
 
+        // Set decryption key if provided
+        if (key_hex) {
+            unsigned char key[64];
+            int key_len = parse_hex_key(key_hex, key, sizeof(key));
+            if (key_len <= 0) {
+                fprintf(stderr, "错误: 无效的密钥格式\n");
+                return 1;
+            }
+            ccvfs_set_encryption_key(key, key_len);
+            if (verbose) {
+                printf("已设置解密密钥: ");
+                print_hex_key(key, key_len);
+                printf("\n");
+            }
+        }
+
         if (verbose) {
             printf("解压参数:\n");
             printf("  压缩文件: %s\n", compressed_db);
@@ -418,6 +482,90 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "数据库解压失败，错误代码: %d\n", rc);
             return 1;
         }
+    } else if (strcmp(operation, "encrypt") == 0) {
+        if (optind + 2 >= argc) {
+            fprintf(stderr, "错误: encrypt 操作需要源文件和加密文件参数\n");
+            print_usage(argv[0]);
+            return 1;
+        }
+
+        const char *source_db = argv[optind + 1];
+        const char *encrypted_db = argv[optind + 2];
+
+        if (!key_hex) {
+            fprintf(stderr, "错误: encrypt 操作需要指定密钥 (-k 参数)\n");
+            return 1;
+        }
+
+        return perform_encrypt_database(source_db, encrypted_db, encrypt_algo, key_hex, verbose);
+    } else if (strcmp(operation, "decrypt") == 0) {
+        if (optind + 2 >= argc) {
+            fprintf(stderr, "错误: decrypt 操作需要加密文件和输出文件参数\n");
+            print_usage(argv[0]);
+            return 1;
+        }
+
+        const char *encrypted_db = argv[optind + 1];
+        const char *output_db = argv[optind + 2];
+
+        if (!key_hex) {
+            fprintf(stderr, "错误: decrypt 操作需要指定密钥 (-k 参数)\n");
+            return 1;
+        }
+
+        return perform_decrypt_database(encrypted_db, output_db, key_hex, verbose);
+    } else if (strcmp(operation, "compress-encrypt") == 0) {
+        if (optind + 2 >= argc) {
+            fprintf(stderr, "错误: compress-encrypt 操作需要源文件和目标文件参数\n");
+            print_usage(argv[0]);
+            return 1;
+        }
+
+        const char *source_db = argv[optind + 1];
+        const char *target_db = argv[optind + 2];
+
+        if (!key_hex) {
+            fprintf(stderr, "错误: compress-encrypt 操作需要指定密钥 (-k 参数)\n");
+            return 1;
+        }
+
+        // Auto-detect page size if not specified
+        if (page_size == 0) {
+            sqlite3 *db = NULL;
+            int rc_open = sqlite3_open_v2(source_db, &db, SQLITE_OPEN_READONLY, NULL);
+            if (rc_open == SQLITE_OK) {
+                sqlite3_stmt *stmt = NULL;
+                rc_open = sqlite3_prepare_v2(db, "PRAGMA page_size", -1, &stmt, NULL);
+                if (rc_open == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+                    page_size = (uint32_t) sqlite3_column_int(stmt, 0);
+                }
+                if (stmt) sqlite3_finalize(stmt);
+                sqlite3_close(db);
+            }
+            if (page_size == 0) {
+                page_size = CCVFS_DEFAULT_PAGE_SIZE;
+            }
+        }
+
+        return perform_compress_encrypt_database(source_db, target_db, compress_algo, 
+                                                encrypt_algo, key_hex, page_size, 
+                                                compression_level, verbose);
+    } else if (strcmp(operation, "decrypt-decompress") == 0) {
+        if (optind + 2 >= argc) {
+            fprintf(stderr, "错误: decrypt-decompress 操作需要加密文件和输出文件参数\n");
+            print_usage(argv[0]);
+            return 1;
+        }
+
+        const char *encrypted_file = argv[optind + 1];
+        const char *output_db = argv[optind + 2];
+
+        if (!key_hex) {
+            fprintf(stderr, "错误: decrypt-decompress 操作需要指定密钥 (-k 参数)\n");
+            return 1;
+        }
+
+        return perform_decrypt_decompress_database(encrypted_file, output_db, key_hex, verbose);
     } else if (strcmp(operation, "info") == 0) {
         if (optind + 1 >= argc) {
             fprintf(stderr, "错误: info 操作需要压缩文件参数\n");
@@ -746,6 +894,275 @@ static int perform_database_compare(const char *db1_path, const char *db2_path, 
         return (result.tables_different + result.records_different + result.schema_differences) > 0 ? 2 : 0;
     } else {
         fprintf(stderr, "数据库比较失败，错误代码: %d\n", rc);
+        return 1;
+    }
+}
+
+// ============================================================================
+// ENCRYPTION/DECRYPTION FUNCTIONS
+// ============================================================================
+
+// Parse hexadecimal key string to binary
+static int parse_hex_key(const char *hex_str, unsigned char *key, int max_len) {
+    return parse_hex_key_for_algorithm(hex_str, key, max_len, NULL);
+}
+
+// Parse hexadecimal key string to binary with algorithm-specific padding
+static int parse_hex_key_for_algorithm(const char *hex_str, unsigned char *key, int max_len, const char *algorithm) {
+    if (!hex_str || !key) return -1;
+    
+    int hex_len = strlen(hex_str);
+    if (hex_len % 2 != 0) {
+        fprintf(stderr, "错误: 密钥必须是偶数个十六进制字符\n");
+        return -1;
+    }
+    
+    int key_len = hex_len / 2;
+    if (key_len > max_len) {
+        fprintf(stderr, "错误: 密钥太长，最大允许 %d 字节\n", max_len);
+        return -1;
+    }
+    
+    // Parse hex string to binary
+    for (int i = 0; i < key_len; i++) {
+        unsigned int byte;
+        if (sscanf(hex_str + i * 2, "%2x", &byte) != 1) {
+            fprintf(stderr, "错误: 无效的十六进制字符 '%c%c'\n", 
+                    hex_str[i * 2], hex_str[i * 2 + 1]);
+            return -1;
+        }
+        key[i] = (unsigned char) byte;
+    }
+    
+    // Determine target length based on algorithm
+    int target_len = key_len;
+    if (algorithm) {
+        if (strcmp(algorithm, "aes256") == 0) {
+            target_len = (key_len < 32) ? 32 : key_len;
+        } else if (strcmp(algorithm, "aes128") == 0) {
+            target_len = (key_len < 16) ? 16 : key_len;
+        } else {
+            // For other algorithms, pad to 16 bytes minimum
+            target_len = (key_len < 16) ? 16 : key_len;
+        }
+    } else {
+        // Default behavior: pad to 16 bytes minimum
+        if (key_len < 16) {
+            target_len = 16;
+        } else if (key_len < 32 && key_len > 16) {
+            target_len = 32;
+        }
+    }
+    
+    // Pad with zeros if needed
+    if (target_len > key_len && target_len <= max_len) {
+        memset(key + key_len, 0, target_len - key_len);
+        if (key_len < target_len) {
+            printf("提示: 密钥长度不足，已自动补0: %d 字节 -> %d 字节\n", key_len, target_len);
+        }
+        return target_len;
+    }
+    
+    return key_len;
+}
+
+// Print key in hexadecimal format
+static void print_hex_key(const unsigned char *key, int len) {
+    for (int i = 0; i < len; i++) {
+        printf("%02X", key[i]);
+    }
+}
+
+static int perform_encrypt_database(const char *source_db, const char *encrypted_db, 
+                                  const char *encrypt_algo, const char *key_hex, int verbose) {
+    // Use default encryption algorithm if not specified
+    if (!encrypt_algo) {
+        encrypt_algo = "aes256";
+        if (verbose) {
+            printf("提示: 未指定加密算法，使用默认值: %s\n", encrypt_algo);
+        }
+    }
+    
+    unsigned char key[64];
+    int key_len = parse_hex_key_for_algorithm(key_hex, key, sizeof(key), encrypt_algo);
+    if (key_len <= 0) {
+        fprintf(stderr, "错误: 无效的密钥格式\n");
+        return 1;
+    }
+    
+    // Set encryption key globally
+    ccvfs_set_encryption_key(key, key_len);
+    
+    // Auto-detect page size from source database
+    uint32_t page_size = 0;
+    sqlite3 *db = NULL;
+    int rc_open = sqlite3_open_v2(source_db, &db, SQLITE_OPEN_READONLY, NULL);
+    if (rc_open == SQLITE_OK) {
+        sqlite3_stmt *stmt = NULL;
+        rc_open = sqlite3_prepare_v2(db, "PRAGMA page_size", -1, &stmt, NULL);
+        if (rc_open == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            page_size = (uint32_t) sqlite3_column_int(stmt, 0);
+        }
+        if (stmt) sqlite3_finalize(stmt);
+        sqlite3_close(db);
+    }
+    
+    // Fallback to default if detection failed
+    if (page_size == 0) {
+        page_size = CCVFS_DEFAULT_PAGE_SIZE;
+    }
+    
+    if (verbose) {
+        printf("加密参数:\n");
+        printf("  源文件: %s\n", source_db);
+        printf("  加密文件: %s\n", encrypted_db);
+        printf("  加密算法: %s\n", encrypt_algo);
+        printf("  页大小: %u 字节 (%u KB)\n", page_size, page_size / 1024);
+        printf("  密钥长度: %d 字节\n", key_len);
+        printf("  密钥: ");
+        print_hex_key(key, key_len);
+        printf("\n\n");
+    }
+    
+    // Use compress function with no compression but with encryption
+    int rc = sqlite3_ccvfs_compress_database_with_page_size(
+        source_db, encrypted_db, NULL, encrypt_algo, page_size, 0);
+    
+    if (rc == SQLITE_OK) {
+        printf("\n数据库加密成功!\n");
+        
+        // Show statistics
+        CCVFSStats stats;
+        if (sqlite3_ccvfs_get_stats(encrypted_db, &stats) == SQLITE_OK) {
+            print_stats(&stats);
+        }
+        return 0;
+    } else {
+        fprintf(stderr, "数据库加密失败，错误代码: %d\n", rc);
+        return 1;
+    }
+}
+
+static int perform_decrypt_database(const char *encrypted_db, const char *output_db, 
+                                  const char *key_hex, int verbose) {
+    unsigned char key[64];
+    int key_len = parse_hex_key(key_hex, key, sizeof(key));
+    if (key_len <= 0) {
+        fprintf(stderr, "错误: 无效的密钥格式\n");
+        return 1;
+    }
+    
+    // Set decryption key globally
+    ccvfs_set_encryption_key(key, key_len);
+    
+    if (verbose) {
+        printf("解密参数:\n");
+        printf("  加密文件: %s\n", encrypted_db);
+        printf("  输出文件: %s\n", output_db);
+        printf("  密钥长度: %d 字节\n", key_len);
+        printf("  密钥: ");
+        print_hex_key(key, key_len);
+        printf("\n\n");
+    }
+    
+    // Use decompress function which will handle decryption
+    int rc = sqlite3_ccvfs_decompress_database(encrypted_db, output_db);
+    
+    if (rc == SQLITE_OK) {
+        printf("\n数据库解密成功!\n");
+        return 0;
+    } else {
+        fprintf(stderr, "数据库解密失败，错误代码: %d\n", rc);
+        return 1;
+    }
+}
+
+static int perform_compress_encrypt_database(const char *source_db, const char *target_db, 
+                                           const char *compress_algo, const char *encrypt_algo,
+                                           const char *key_hex, uint32_t page_size, 
+                                           int compression_level, int verbose) {
+    // Use default encryption algorithm if not specified
+    if (!encrypt_algo) {
+        encrypt_algo = "aes256";
+        if (verbose) {
+            printf("提示: 未指定加密算法，使用默认值: %s\n", encrypt_algo);
+        }
+    }
+    
+    unsigned char key[64];
+    int key_len = parse_hex_key_for_algorithm(key_hex, key, sizeof(key), encrypt_algo);
+    if (key_len <= 0) {
+        fprintf(stderr, "错误: 无效的密钥格式\n");
+        return 1;
+    }
+    
+    // Set encryption key globally
+    ccvfs_set_encryption_key(key, key_len);
+    
+    if (verbose) {
+        printf("压缩加密参数:\n");
+        printf("  源文件: %s\n", source_db);
+        printf("  目标文件: %s\n", target_db);
+        printf("  压缩算法: %s\n", compress_algo);
+        printf("  加密算法: %s\n", encrypt_algo);
+        printf("  页大小: %u 字节 (%u KB)\n", page_size, page_size / 1024);
+        printf("  压缩等级: %d\n", compression_level);
+        printf("  密钥长度: %d 字节\n", key_len);
+        printf("  密钥: ");
+        print_hex_key(key, key_len);
+        printf("\n\n");
+    }
+    
+    // Perform compression and encryption together
+    int rc = sqlite3_ccvfs_compress_database_with_page_size(
+        source_db, target_db, compress_algo, encrypt_algo, 
+        page_size, compression_level);
+    
+    if (rc == SQLITE_OK) {
+        printf("\n数据库压缩加密成功!\n");
+        
+        // Show statistics
+        CCVFSStats stats;
+        if (sqlite3_ccvfs_get_stats(target_db, &stats) == SQLITE_OK) {
+            print_stats(&stats);
+        }
+        return 0;
+    } else {
+        fprintf(stderr, "数据库压缩加密失败，错误代码: %d\n", rc);
+        return 1;
+    }
+}
+
+static int perform_decrypt_decompress_database(const char *encrypted_file, const char *output_db,
+                                              const char *key_hex, int verbose) {
+    unsigned char key[64];
+    int key_len = parse_hex_key(key_hex, key, sizeof(key));
+    if (key_len <= 0) {
+        fprintf(stderr, "错误: 无效的密钥格式\n");
+        return 1;
+    }
+    
+    // Set decryption key globally
+    ccvfs_set_encryption_key(key, key_len);
+    
+    if (verbose) {
+        printf("解密解压参数:\n");
+        printf("  加密文件: %s\n", encrypted_file);
+        printf("  输出文件: %s\n", output_db);
+        printf("  密钥长度: %d 字节\n", key_len);
+        printf("  密钥: ");
+        print_hex_key(key, key_len);
+        printf("\n\n");
+    }
+    
+    // Use decompress function which will handle both decryption and decompression
+    int rc = sqlite3_ccvfs_decompress_database(encrypted_file, output_db);
+    
+    if (rc == SQLITE_OK) {
+        printf("\n数据库解密解压成功!\n");
+        return 0;
+    } else {
+        fprintf(stderr, "数据库解密解压失败，错误代码: %d\n", rc);
         return 1;
     }
 }
