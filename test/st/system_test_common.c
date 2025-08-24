@@ -18,6 +18,14 @@ void cleanup_test_files(const char* prefix) {
     snprintf(filename, sizeof(filename), "%s.ccvfs", prefix);
     remove(filename);
     
+    // Encrypted database file
+    snprintf(filename, sizeof(filename), "%s.dbe", prefix);
+    remove(filename);
+    
+    // Encrypted database file with _short suffix
+    snprintf(filename, sizeof(filename), "%s_short.dbe", prefix);
+    remove(filename);
+    
     // Journal file
     snprintf(filename, sizeof(filename), "%s.db-journal", prefix);
     remove(filename);
@@ -32,6 +40,18 @@ void cleanup_test_files(const char* prefix) {
     
     // Restored file
     snprintf(filename, sizeof(filename), "%s_restored.db", prefix);
+    remove(filename);
+    
+    // Decrypted files
+    snprintf(filename, sizeof(filename), "%s_decrypted.db", prefix);
+    remove(filename);
+    
+    // Short key decrypted files
+    snprintf(filename, sizeof(filename), "%s_short_dec.db", prefix);
+    remove(filename);
+    
+    // Expanded key decrypted files
+    snprintf(filename, sizeof(filename), "%s_expanded_dec.db", prefix);
     remove(filename);
 }
 

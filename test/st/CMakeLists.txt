@@ -18,6 +18,7 @@ add_executable(system_tests
     test_storage.c
     test_buffer.c
     test_tools.c
+    test_encryption.c
 )
 
 # Link with the main sqlitecc library
@@ -96,6 +97,27 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# Basic Encryption Test
+add_test(
+    NAME SystemTest_Basic_Encryption
+    COMMAND system_tests basic_encryption
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# AES-256 Encryption Test
+add_test(
+    NAME SystemTest_AES256_Encryption
+    COMMAND system_tests aes256_encryption
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# Key Auto-Completion Test
+add_test(
+    NAME SystemTest_Key_Auto_Completion
+    COMMAND system_tests key_auto_completion
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
 # Add a test for running all system tests
 add_test(
     NAME SystemTest_All
@@ -123,6 +145,8 @@ set_tests_properties(
 set_tests_properties(
     SystemTest_Large_DB_Stress
     SystemTest_Large_DB_Compression_Integrity
+    SystemTest_Basic_Encryption
+    SystemTest_AES256_Encryption
     SystemTest_All
     PROPERTIES
     TIMEOUT 600  # 10 minutes timeout
@@ -132,6 +156,9 @@ set_tests_properties(
 set_tests_properties(
     SystemTest_VFS_Connection
     SystemTest_Simple_DB
+    SystemTest_Basic_Encryption
+    SystemTest_AES256_Encryption
+    SystemTest_Key_Auto_Completion
     PROPERTIES
     LABELS "Basic"
 )

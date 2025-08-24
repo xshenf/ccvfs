@@ -118,7 +118,7 @@ int ccvfs_load_page_index(CCVFSFile *pFile) {
             return SQLITE_NOMEM;
         }
         memset(pFile->pPageIndex, 0, pFile->index_capacity * sizeof(CCVFSPageIndex));
-        CCVFS_INFO("Initialized empty page index with capacity %u", pFile->index_capacity);
+        CCVFS_DEBUG("Initialized empty page index with capacity %u", pFile->index_capacity);
         return SQLITE_OK;
     }
     
@@ -150,7 +150,7 @@ int ccvfs_load_page_index(CCVFSFile *pFile) {
     
     pFile->index_dirty = 0; // Just loaded, so it's not dirty
     
-    CCVFS_INFO("Loaded page index: %d pages, capacity %u", 
+    CCVFS_DEBUG("Loaded page index: %d pages, capacity %u",
               pFile->header.total_pages, pFile->index_capacity);
               
     // Log mapping table contents for debugging
@@ -224,7 +224,7 @@ int ccvfs_save_page_index(CCVFSFile *pFile) {
     // Mark as clean after successful save
     pFile->index_dirty = 0;
     
-    CCVFS_INFO("Successfully saved page index: %d pages at offset %llu", 
+    CCVFS_DEBUG("Successfully saved page index: %d pages at offset %llu",
               pFile->header.total_pages, (unsigned long long)pFile->header.index_table_offset);
     return SQLITE_OK;
 }
@@ -361,7 +361,7 @@ int ccvfs_expand_page_index(CCVFSFile *pFile, uint32_t new_page_count) {
     pFile->header.total_pages = new_page_count;
     pFile->index_dirty = 1; // Mark as dirty since we're changing it
     
-    CCVFS_INFO("Successfully expanded page index: capacity=%u, active_pages=%u", 
+    CCVFS_DEBUG("Successfully expanded page index: capacity=%u, active_pages=%u",
               new_capacity, new_page_count);
     return SQLITE_OK;
 }
@@ -397,7 +397,7 @@ int ccvfs_force_save_page_index(CCVFSFile *pFile) {
     // Mark as clean after successful save
     pFile->index_dirty = 0;
     
-    CCVFS_INFO("Force saved page index: %d pages", pFile->header.total_pages);
+    CCVFS_DEBUG("Force saved page index: %d pages", pFile->header.total_pages);
     return SQLITE_OK;
 }
 

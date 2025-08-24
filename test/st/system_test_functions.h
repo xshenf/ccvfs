@@ -16,6 +16,11 @@ int test_large_db_stress(TestResult* result);
 int test_simple_large(TestResult* result);
 int test_large_db_compression_integrity(TestResult* result);
 
+// Encryption tests (test_encryption.c)
+int test_basic_encryption(TestResult* result);
+int test_aes256_encryption(TestResult* result);
+int test_key_auto_completion(TestResult* result);
+
 // Storage tests (test_storage.c)
 int test_hole_detection(TestResult* result);
 int test_simple_hole(TestResult* result);

@@ -192,7 +192,7 @@ int ccvfsIoClose(sqlite3_file *pFile) {
         ccvfs_report_file_health(p);
     }
 
-    CCVFS_INFO("File closed: %s", p->filename ? p->filename : "(null)");
+    CCVFS_DEBUG("File closed: %s", p->filename ? p->filename : "(null)");
 
     // Free filename
     if (p->filename) {
@@ -766,7 +766,7 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
             if (sizeRc == SQLITE_OK) {
                 uint64_t pageEndOffset = pIndex->physical_offset + existingSpace;
                 uint32_t expansionNeeded = compressedSize - existingSpace;
-                CCVFS_INFO("-------");
+                CCVFS_DEBUG("-------");
                 
                 // 限制极端扩展以防止病态行为
                 double growthRatio = (double)compressedSize / (double)existingSpace;
@@ -806,7 +806,7 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
                                (unsigned long long)writeOffset, existingSpace, compressedSize, expansionNeeded, growthRatio);
                 } else {
                     // 不能安全扩展 - 分配新空间并添加旧空间为空洞
-                    CCVFS_INFO("不能安全扩展（相邻页或EOF），分配新空间");
+                    CCVFS_DEBUG("不能安全扩展（相邻页或EOF），分配新空间");
                     
                     // Add the old space as a hole since we're abandoning it
                     int rc = ccvfs_add_hole(pFile, pIndex->physical_offset, existingSpace);
@@ -1047,7 +1047,7 @@ static void ccvfs_report_file_health(CCVFSFile *pFile) {
     
     uint32_t totalErrors = pFile->checksum_error_count + pFile->corrupted_page_count;
     if (totalErrors == 0) {
-        CCVFS_INFO("文件健康状况良好：没有发现数据损坏 File health: Good - no data corruption detected");
+        CCVFS_DEBUG("文件健康状况良好：没有发现数据损坏 File health: Good - no data corruption detected");
         return;
     }
     
@@ -1080,12 +1080,12 @@ static void ccvfs_report_file_health(CCVFSFile *pFile) {
         healthStatus = "严重损坏 Critical";
     }
     
-    CCVFS_INFO("文件健康报告 File Health Report: %s (评分Score: %u/100)", healthStatus, integrityScore);
-    CCVFS_INFO("  校验和错误 Checksum errors: %u", pFile->checksum_error_count);
-    CCVFS_INFO("  损坏页数量 Corrupted pages: %u/%u (%.1f%%)",
+    CCVFS_DEBUG("文件健康报告 File Health Report: %s (评分Score: %u/100)", healthStatus, integrityScore);
+    CCVFS_DEBUG("  校验和错误 Checksum errors: %u", pFile->checksum_error_count);
+    CCVFS_DEBUG("  损坏页数量 Corrupted pages: %u/%u (%.1f%%)",
                pFile->corrupted_page_count, totalPages, 
                totalPages > 0 ? (pFile->corrupted_page_count * 100.0f / totalPages) : 0.0f);
-    CCVFS_INFO("  恢复尝试 Recovery attempts: %u (成功率Success rate: %u%%)", 
+    CCVFS_DEBUG("  恢复尝试 Recovery attempts: %u (成功率Success rate: %u%%)",
                pFile->recovery_attempt_count, recoveryRate);
     
     if (integrityScore < 80) {
@@ -1718,7 +1718,7 @@ int ccvfs_init_write_buffer(CCVFSFile *pFile) {
     pFile->buffer_merge_count = 0;
     pFile->total_buffered_writes = 0;
     
-    CCVFS_INFO("Write buffer initialized: enabled=%d, max_entries=%u, max_size=%u KB, auto_flush=%u", 
+    CCVFS_DEBUG("Write buffer initialized: enabled=%d, max_entries=%u, max_size=%u KB, auto_flush=%u",
               pBuffer->enabled, pBuffer->max_entries, pBuffer->max_buffer_size / 1024, pBuffer->auto_flush_pages);
     
     return SQLITE_OK;
@@ -1757,7 +1757,7 @@ void ccvfs_cleanup_write_buffer(CCVFSFile *pFile) {
     
     // Report final statistics
     if (1 || pBuffer->entry_count > 0 || pFile->total_buffered_writes > 0) {
-        CCVFS_INFO("Write buffer cleanup stats: entries=%u, hits=%u, flushes=%u, merges=%u, total_writes=%u",
+        CCVFS_DEBUG("Write buffer cleanup stats: entries=%u, hits=%u, flushes=%u, merges=%u, total_writes=%u",
                   pBuffer->entry_count, pFile->buffer_hit_count, 
                   pFile->buffer_flush_count, pFile->buffer_merge_count, pFile->total_buffered_writes);
     }
@@ -2141,7 +2141,7 @@ int ccvfs_init_hole_manager(CCVFSFile *pFile) {
     pFile->hole_cleanup_count = 0;
     pFile->hole_operations_count = 0;
     
-    CCVFS_INFO("Hole manager initialized: enabled=%d, max_holes=%u, min_hole_size=%u", 
+    CCVFS_DEBUG("Hole manager initialized: enabled=%d, max_holes=%u, min_hole_size=%u",
               pManager->enabled, pManager->max_holes, pManager->min_hole_size);
     
     return SQLITE_OK;
@@ -2171,7 +2171,7 @@ void ccvfs_cleanup_hole_manager(CCVFSFile *pFile) {
     
     // Report final statistics
     if (1 || pManager->hole_count > 0 || pFile->hole_allocation_count > 0) {
-        CCVFS_INFO("Hole manager cleanup stats: tracked_holes=%u, allocations=%u, merges=%u, cleanups=%u",
+        CCVFS_DEBUG("Hole manager cleanup stats: tracked_holes=%u, allocations=%u, merges=%u, cleanups=%u",
                   pManager->hole_count, pFile->hole_allocation_count, 
                   pFile->hole_merge_count, pFile->hole_cleanup_count);
     }
@@ -2578,7 +2578,7 @@ static void ccvfs_merge_adjacent_holes(CCVFSFile *pFile) {
     
     if (mergeCount > 0) {
         pFile->hole_merge_count += mergeCount;
-        CCVFS_INFO("Merged %d holes, total merges: %u, remaining holes: %u",
+        CCVFS_DEBUG("Merged %d holes, total merges: %u, remaining holes: %u",
                   mergeCount, pFile->hole_merge_count, pManager->hole_count);
     } else {
         CCVFS_DEBUG("No adjacent holes found to merge");
@@ -2635,7 +2635,7 @@ static void ccvfs_cleanup_small_holes(CCVFSFile *pFile) {
     
     if (cleanupCount > 0) {
         pFile->hole_cleanup_count += cleanupCount;
-        CCVFS_INFO("Cleaned up %d small holes, total cleanups: %u, remaining holes: %u",
+        CCVFS_DEBUG("Cleaned up %d small holes, total cleanups: %u, remaining holes: %u",
                   cleanupCount, pFile->hole_cleanup_count, pManager->hole_count);
     } else {
         CCVFS_DEBUG("No small holes found to cleanup");

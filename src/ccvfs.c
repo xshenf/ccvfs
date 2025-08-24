@@ -2,6 +2,7 @@
 #include "ccvfs_algorithm.h"
 
 #include <string.h>
+#include <sys/stat.h>
 
 #include "ccvfs_io.h"
 
@@ -240,7 +241,7 @@ int sqlite3_ccvfs_create(
         return rc;
     }
     
-    CCVFS_INFO("Successfully created CCVFS: %s", zVfsName);
+    CCVFS_DEBUG("Successfully created CCVFS: %s", zVfsName);
     return SQLITE_OK;
 }
 
@@ -289,7 +290,7 @@ int sqlite3_ccvfs_destroy(const char *zVfsName) {
     
     pVfs = sqlite3_vfs_find(zVfsName);
     if (!pVfs) {
-        CCVFS_ERROR("VFS not found: %s", zVfsName);
+        CCVFS_DEBUG("VFS not found: %s", zVfsName);
         return SQLITE_ERROR;
     }
     
@@ -301,7 +302,7 @@ int sqlite3_ccvfs_destroy(const char *zVfsName) {
     // Free memory
     sqlite3_free(pCcvfs);
     
-    CCVFS_INFO("Successfully destroyed CCVFS: %s", zVfsName);
+    CCVFS_DEBUG("Successfully destroyed CCVFS: %s", zVfsName);
     return SQLITE_OK;
 }
 
@@ -353,7 +354,7 @@ int sqlite3_ccvfs_configure_write_buffer(
         pCcvfs->auto_flush_pages = auto_flush_pages;
     }
     
-    CCVFS_INFO("Write buffer configured: enabled=%d, max_entries=%u, max_size=%u KB, auto_flush=%u",
+    CCVFS_DEBUG("Write buffer configured: enabled=%d, max_entries=%u, max_size=%u KB, auto_flush=%u",
               pCcvfs->enable_write_buffer, pCcvfs->max_buffer_entries, 
               pCcvfs->max_buffer_size / 1024, pCcvfs->auto_flush_pages);
     
@@ -439,7 +440,7 @@ int sqlite3_ccvfs_flush_write_buffer(sqlite3 *db) {
             CCVFS_ERROR("Failed to flush write buffer: %d", rc);
             return rc;
         }
-        CCVFS_INFO("Write buffer flushed successfully");
+        CCVFS_DEBUG("Write buffer flushed successfully");
     } else {
         CCVFS_DEBUG("No buffered data to flush");
     }
@@ -459,7 +460,7 @@ int sqlite3_activate_ccvfs(const CompressAlgorithm *pCompressAlg, const EncryptA
                 pEncryptAlg ? pEncryptAlg->name : "(none)");
     
     if (isActivated) {
-        CCVFS_INFO("CCVFS already activated");
+        CCVFS_DEBUG("CCVFS already activated");
         return SQLITE_OK;
     }
     
@@ -474,7 +475,7 @@ int sqlite3_activate_ccvfs(const CompressAlgorithm *pCompressAlg, const EncryptA
     if (ccvfs) {
         sqlite3_vfs_register(ccvfs, 1);
         isActivated = 1;
-        CCVFS_INFO("CCVFS activated successfully, set as default VFS");
+        CCVFS_DEBUG("CCVFS activated successfully, set as default VFS");
         return SQLITE_OK;
     } else {
         CCVFS_ERROR("Cannot find the newly created CCVFS");
@@ -505,7 +506,15 @@ int sqlite3_ccvfs_compress_encrypt(
         return SQLITE_MISUSE;
     }
     
-    CCVFS_INFO("开始执行压缩加密操作: VFS=%s, source=%s, target=%s", 
+    // 检查目标文件是否已经存在
+    struct stat target_stat;
+    if (stat(target_db, &target_stat) == 0) {
+        // 目标文件存在，返回错误
+        CCVFS_ERROR("目标文件已存在: %s", target_db);
+        return SQLITE_ERROR;
+    }
+    
+    CCVFS_DEBUG("开始执行压缩加密操作: VFS=%s, source=%s, target=%s",
               zVfsName, source_db, target_db);
     
     // 验证VFS是否存在
@@ -515,14 +524,14 @@ int sqlite3_ccvfs_compress_encrypt(
         return SQLITE_ERROR;
     }
     
-    // 打开源数据库（只读模式）
+    // 打开标准SQLite数据库（只读模式）
     rc = sqlite3_open_v2(source_db, &source, SQLITE_OPEN_READONLY, NULL);
     if (rc != SQLITE_OK) {
         CCVFS_ERROR("打开源数据库失败: %s", sqlite3_errmsg(source));
         return rc;
     }
     
-    // 使用指定VFS创建目标数据库
+    // 使用指定VFS创建压缩/加密数据库
     rc = sqlite3_open_v2(target_db, &target, 
                          SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 
                          zVfsName);
@@ -541,7 +550,7 @@ int sqlite3_ccvfs_compress_encrypt(
         return SQLITE_ERROR;
     }
     
-    CCVFS_INFO("正在压缩加密数据库...");
+    CCVFS_DEBUG("正在压缩加密数据库...");
     
     // 复制所有页面
     do {
@@ -553,7 +562,7 @@ int sqlite3_ccvfs_compress_encrypt(
     sqlite3_close(target);
     
     if (rc == SQLITE_DONE) {
-        CCVFS_INFO("数据库压缩加密成功");
+        CCVFS_DEBUG("数据库压缩加密成功");
         return SQLITE_OK;
     } else {
         CCVFS_ERROR("数据库压缩加密失败: %d", rc);
@@ -579,7 +588,15 @@ int sqlite3_ccvfs_decompress_decrypt(
         return SQLITE_MISUSE;
     }
     
-    CCVFS_INFO("开始执行解压解密操作: VFS=%s, source=%s, target=%s", 
+    // 检查目标文件是否已经存在
+    struct stat target_stat;
+    if (stat(target_db, &target_stat) == 0) {
+        // 目标文件存在，返回错误
+        CCVFS_ERROR("目标文件已存在: %s", target_db);
+        return SQLITE_ERROR;
+    }
+    
+    CCVFS_DEBUG("开始执行解压解密操作: VFS=%s, source=%s, target=%s",
               zVfsName, source_db, target_db);
     
     // 验证VFS是否存在
@@ -615,7 +632,7 @@ int sqlite3_ccvfs_decompress_decrypt(
         return SQLITE_ERROR;
     }
     
-    CCVFS_INFO("正在解压解密数据库...");
+    CCVFS_DEBUG("正在解压解密数据库...");
     
     // 复制所有页面
     do {
@@ -627,7 +644,7 @@ int sqlite3_ccvfs_decompress_decrypt(
     sqlite3_close(target);
     
     if (rc == SQLITE_DONE) {
-        CCVFS_INFO("数据库解压解密成功");
+        CCVFS_DEBUG("数据库解压解密成功");
         return SQLITE_OK;
     } else {
         CCVFS_ERROR("数据库解压解密失败: %d", rc);
@@ -651,7 +668,7 @@ int sqlite3_ccvfs_create_and_compress_encrypt(
 ) {
     int rc;
     
-    CCVFS_INFO("创建VFS并执行压缩加密: VFS=%s", zVfsName);
+    CCVFS_DEBUG("创建VFS并执行压缩加密: VFS=%s", zVfsName);
     
     // 先尝试销毁现有VFS（如果存在）
     sqlite3_ccvfs_destroy(zVfsName);
@@ -696,7 +713,7 @@ int sqlite3_ccvfs_create_and_decompress_decrypt(
 ) {
     int rc;
     
-    CCVFS_INFO("创建VFS并执行解压解密: VFS=%s", zVfsName);
+    CCVFS_DEBUG("创建VFS并执行解压解密: VFS=%s", zVfsName);
     
     // 先尝试销毁现有VFS（如果存在）
     sqlite3_ccvfs_destroy(zVfsName);
