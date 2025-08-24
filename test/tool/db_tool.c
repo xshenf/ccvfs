@@ -81,7 +81,7 @@ static void print_usage(const char *program_name) {
 
     printf("压缩/解压选项:\n");
     printf("  -c, --compress-algo <算法>       压缩算法 (rle, lz4, zlib)\n");
-    printf("  -e, --encrypt-algo <算法>        加密算法 (xor, aes128, aes256, chacha20)\n");
+    printf("  -e, --encrypt-algo <算法>        加密算法 (xor, aes128, aes256, chacha20, 默认: aes128)\n");
     printf("  -l, --level <等级>               压缩等级 (1-9, 默认: 6)\n");
     printf("  -b, --page-size <大小>          页大小 (1K, 4K, 8K, 16K, 32K, 64K, 128K, 256K, 512K, 1M, 默认: 64K)\n\n");
 
@@ -122,8 +122,10 @@ static void print_usage(const char *program_name) {
     printf("  %s compress -b 4K test.db test.ccvfs          # 使用4KB页大小\n", program_name);
     printf("  %s compress -b 1M -c zlib test.db test.ccvfs  # 使用1MB页大小\n", program_name);
     printf("  %s decompress test.ccvfs restored.db\n", program_name);
+    printf("  %s encrypt -k 0123456789ABCDEF test.db encrypted.db                    # 使用默认aes128\n", program_name);
     printf("  %s encrypt -e aes256 -k 0123456789ABCDEF test.db encrypted.db\n", program_name);
     printf("  %s decrypt -k 0123456789ABCDEF encrypted.db decrypted.db\n", program_name);
+    printf("  %s compress-encrypt -c zlib -k 0123456789ABCDEF test.db secure.ccvfs    # 使用默认aes128\n", program_name);
     printf("  %s compress-encrypt -c zlib -e aes256 -k 0123456789ABCDEF test.db secure.ccvfs\n", program_name);
     printf("  %s decrypt-decompress -k 0123456789ABCDEF secure.ccvfs restored.db\n", program_name);
     printf("  %s info test.ccvfs\n", program_name);
@@ -490,9 +492,12 @@ int main(int argc, char *argv[]) {
         const char *source_db = argv[optind + 1];
         const char *encrypted_db = argv[optind + 2];
 
+        // Use default encryption algorithm if not specified
         if (!encrypt_algo) {
-            fprintf(stderr, "错误: encrypt 操作需要指定加密算法 (-e 参数)\n");
-            return 1;
+            encrypt_algo = "aes128";  // Default encryption algorithm (使用aes128避免缓冲区问题)
+            if (verbose) {
+                printf("使用默认加密算法: %s\n", encrypt_algo);
+            }
         }
 
         if (!key_hex) {
@@ -527,9 +532,12 @@ int main(int argc, char *argv[]) {
         const char *source_db = argv[optind + 1];
         const char *target_db = argv[optind + 2];
 
+        // Use default encryption algorithm if not specified
         if (!encrypt_algo) {
-            fprintf(stderr, "错误: compress-encrypt 操作需要指定加密算法 (-e 参数)\n");
-            return 1;
+            encrypt_algo = "aes128";  // Default encryption algorithm (使用aes128避免缓冲区问题)
+            if (verbose) {
+                printf("使用默认加密算法: %s\n", encrypt_algo);
+            }
         }
 
         if (!key_hex) {
