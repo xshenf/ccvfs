@@ -22,6 +22,8 @@ static TestCase test_cases[] = {
     {"simple_hole", "Simple hole management test", test_simple_hole},
     {"batch_write_buffer", "Batch write buffer functionality", test_batch_write_buffer},
     {"simple_buffer", "Simple buffer operations", test_simple_buffer},
+    {"batch_write", "Batch write functionality", test_batch_write},
+    {"simple_batch", "Simple batch write operations", test_simple_batch},
     {"db_tools", "Database tools integration test", test_db_tools},
     {NULL, NULL, NULL} // Terminator
 };

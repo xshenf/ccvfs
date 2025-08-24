@@ -19,6 +19,7 @@ add_executable(system_tests
     test_buffer.c
     test_tools.c
     test_encryption.c
+    test_batch.c
 )
 
 # Link with the main sqlitecc library
@@ -97,6 +98,20 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# Batch Write Test
+add_test(
+    NAME SystemTest_Batch_Write
+    COMMAND system_tests batch_write
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# Simple Batch Write Test
+add_test(
+    NAME SystemTest_Simple_Batch
+    COMMAND system_tests simple_batch
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
 # Basic Encryption Test
 add_test(
     NAME SystemTest_Basic_Encryption
@@ -136,6 +151,8 @@ set_tests_properties(
     SystemTest_Simple_Hole
     SystemTest_Batch_Write_Buffer
     SystemTest_Simple_Buffer
+    SystemTest_Batch_Write
+    SystemTest_Simple_Batch
     SystemTest_DB_Tools
     PROPERTIES
     TIMEOUT 300  # 5 minutes timeout for each test
@@ -159,6 +176,8 @@ set_tests_properties(
     SystemTest_Basic_Encryption
     SystemTest_AES256_Encryption
     SystemTest_Key_Auto_Completion
+    SystemTest_Batch_Write
+    SystemTest_Simple_Batch
     PROPERTIES
     LABELS "Basic"
 )

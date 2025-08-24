@@ -657,6 +657,16 @@ int main(int argc, char *argv[]) {
 
         return perform_database_compare(db1_path, db2_path, verbose, 
                                        schema_only, ignore_case, ignore_whitespace, ignore_tables, compare_key_hex);
+    } else if (strcmp(operation, "batch-test") == 0) {
+        if (optind + 1 >= argc) {
+            fprintf(stderr, "错误: batch-test 操作需要数据库文件参数\n");
+            print_usage(argv[0]);
+            return 1;
+        }
+
+        const char *db_path = argv[optind + 1];
+        return perform_batch_test(db_path, batch_enable, batch_pages, 
+                                batch_memory_mb, batch_test_records, verbose);
     } else {
         fprintf(stderr, "错误: 未知操作 '%s'\n", operation);
         print_usage(argv[0]);

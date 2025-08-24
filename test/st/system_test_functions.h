@@ -29,6 +29,10 @@ int test_simple_hole(TestResult* result);
 int test_batch_write_buffer(TestResult* result);
 int test_simple_buffer(TestResult* result);
 
+// Batch write tests (test_batch.c)
+int test_batch_write(TestResult* result);
+int test_simple_batch(TestResult* result);
+
 // Tools tests (test_tools.c)
 int test_db_tools(TestResult* result);
 
