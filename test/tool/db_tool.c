@@ -54,7 +54,7 @@ static int generate_database(int argc, char *argv[], int verbose,
 
 static int perform_database_compare(const char *db1_path, const char *db2_path, int verbose,
                                    int schema_only, int ignore_case, int ignore_whitespace,
-                                   const char *ignore_tables);
+                                   const char *ignore_tables, const char *key_hex);
 
 static void print_usage(const char *program_name) {
     printf("SQLite数据库压缩解压工具\n");
@@ -96,7 +96,8 @@ static void print_usage(const char *program_name) {
     printf("  -s, --schema-only                只比较表结构，不比较数据\n");
     printf("  -i, --ignore-case                忽略字符串比较中的大小写差异\n");
     printf("  -w, --ignore-whitespace          忽略空白字符差异\n");
-    printf("  -t, --ignore-tables <表名>       忽略指定的表（逗号分隔）\n\n");
+    printf("  -t, --ignore-tables <表名>       忽略指定的表（逗号分隔）\n");
+    printf("  -k, --key <密钥>                加密数据库的解密密钥（十六进制格式）\n\n");
 
     printf("批量写入测试选项 (仅用于 batch-test):\n");
     printf("  --batch-enable                   启用批量写入 (默认: 禁用)\n");
@@ -133,6 +134,7 @@ static void print_usage(const char *program_name) {
     printf("  %s generate -C -E aes128 test.ccvfs 500MB    # 生成500MB压缩加密数据库\n", program_name);
     printf("  %s compare db1.db db2.db                      # 比较两个数据库\n", program_name);
     printf("  %s compare -s db1.db db2.db                   # 只比较表结构\n", program_name);
+    printf("  %s compare -k 0123456789ABCDEF original.db encrypted.db  # 比较原始数据库和加密数据库\n", program_name);
     printf("  %s batch-test --batch-enable --batch-records 5000 test.db\n", program_name);
     printf("  %s batch-stats test.db\n", program_name);
     printf("  %s batch-flush test.db\n", program_name);
@@ -620,6 +622,7 @@ int main(int argc, char *argv[]) {
         int ignore_case = 0;
         int ignore_whitespace = 0;
         const char *ignore_tables = NULL;
+        const char *compare_key_hex = NULL;  // Key for comparison
 
         // Reset getopt parsing to get compare-specific options
         optind = 1;
@@ -630,8 +633,11 @@ int main(int argc, char *argv[]) {
         
         // Temporarily modify argc/argv for re-parsing
         int c;
-        while ((c = getopt_long(local_argc, local_argv, "c:e:l:b:CE:siwt:vh", long_options, NULL)) != -1) {
+        while ((c = getopt_long(local_argc, local_argv, "c:e:l:b:k:CE:siwt:vh", long_options, NULL)) != -1) {
             switch (c) {
+                case 'k':
+                    compare_key_hex = optarg;
+                    break;
                 case 's':
                     schema_only = 1;
                     break;
@@ -648,7 +654,7 @@ int main(int argc, char *argv[]) {
         }
 
         return perform_database_compare(db1_path, db2_path, verbose, 
-                                       schema_only, ignore_case, ignore_whitespace, ignore_tables);
+                                       schema_only, ignore_case, ignore_whitespace, ignore_tables, compare_key_hex);
     } else {
         fprintf(stderr, "错误: 未知操作 '%s'\n", operation);
         print_usage(argv[0]);
@@ -867,7 +873,7 @@ static int perform_batch_test(const char *db_path, int enable_batch,
 
 static int perform_database_compare(const char *db1_path, const char *db2_path, int verbose,
                                    int schema_only, int ignore_case, int ignore_whitespace, 
-                                   const char *ignore_tables) {
+                                   const char *ignore_tables, const char *key_hex) {
     // Setup compare options
     CompareOptions options = {0};
     options.compare_schema_only = schema_only;
@@ -875,15 +881,70 @@ static int perform_database_compare(const char *db1_path, const char *db2_path, 
     options.ignore_whitespace = ignore_whitespace;
     options.verbose = verbose;
     options.ignore_tables = ignore_tables;
+    options.key_hex = key_hex;  // Set encryption key
+    
+    // Set decryption key before initializing CCVFS if provided
+    if (key_hex) {
+        unsigned char key[64];
+        int key_len = 0;
+        const char *hex_str = key_hex;
+        int hex_len = strlen(hex_str);
+        
+        if (hex_len % 2 != 0) {
+            fprintf(stderr, "错误: 密钥必须是偶数个十六进制字符\n");
+            return 1;
+        }
+        
+        key_len = hex_len / 2;
+        if (key_len > sizeof(key)) {
+            fprintf(stderr, "错误: 密钥长度超过最大值 %zu 字节\n", sizeof(key));
+            return 1;
+        }
+        
+        // Parse hex string to binary
+        for (int i = 0; i < key_len; i++) {
+            char hex_byte[3] = {hex_str[i*2], hex_str[i*2+1], '\0'};
+            char *endptr;
+            unsigned long byte_val = strtoul(hex_byte, &endptr, 16);
+            if (*endptr != '\0') {
+                fprintf(stderr, "错误: 密钥包含无效的十六进制字符\n");
+                return 1;
+            }
+            key[i] = (unsigned char)byte_val;
+        }
+        
+        // Set decryption key globally
+        ccvfs_set_encryption_key(key, key_len);
+        
+        if (verbose) {
+            printf("已设置解密密钥: ");
+            for (int i = 0; i < key_len; i++) {
+                printf("%02X", key[i]);
+            }
+            printf(" (%d 字节)\n\n", key_len);
+        }
+    }
 
     // Initialize SQLite and CCVFS
     sqlite3_initialize();
     
     // Register CCVFS for handling compressed databases
 #ifdef HAVE_ZLIB
-    int rc = sqlite3_ccvfs_create("ccvfs", NULL, CCVFS_COMPRESS_ZLIB, NULL, 0, 0);
+    int rc = sqlite3_ccvfs_create("ccvfs", NULL, CCVFS_COMPRESS_ZLIB, 
+#ifdef HAVE_OPENSSL
+                                 CCVFS_ENCRYPT_AES128,  // Include AES encryption support
 #else
-    int rc = sqlite3_ccvfs_create("ccvfs", NULL, NULL, NULL, 0, 0);
+                                 NULL,
+#endif
+                                 0, 0);
+#else
+    int rc = sqlite3_ccvfs_create("ccvfs", NULL, NULL, 
+#ifdef HAVE_OPENSSL
+                                 CCVFS_ENCRYPT_AES128,  // Include AES encryption support
+#else
+                                 NULL,
+#endif
+                                 0, 0);
 #endif
     if (rc != SQLITE_OK && verbose) {
         printf("Note: CCVFS registration failed (code %d) - compressed databases may not work\n", rc);
@@ -897,6 +958,9 @@ static int perform_database_compare(const char *db1_path, const char *db2_path, 
         printf("  忽略大小写: %s\n", options.ignore_case ? "是" : "否");
         if (options.ignore_tables) {
             printf("  忽略表: %s\n", options.ignore_tables);
+        }
+        if (options.key_hex) {
+            printf("  已提供解密密钥\n");
         }
         printf("\n");
     }

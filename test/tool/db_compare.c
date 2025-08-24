@@ -21,6 +21,7 @@ typedef struct {
     int compare_schema_only;  // Only compare schema, not data
     int verbose;              // Verbose output
     const char *ignore_tables; // Comma-separated list of tables to ignore
+    const char *key_hex;      // Encryption key in hex format for encrypted databases
 } CompareOptions;
 
 // Function to compare two databases
@@ -628,6 +629,7 @@ static void print_usage(const char *program_name) {
     printf("  -i, --ignore-case            忽略字符串比较中的大小写差异\n");
     printf("  -w, --ignore-whitespace      忽略空白字符差异\n");
     printf("  -t, --ignore-tables <表名>   忽略指定的表（逗号分隔）\n");
+    printf("  -k, --key <密钥>             加密数据库的解密密钥（十六进制格式）\n");
     printf("  -v, --verbose                详细输出\n");
     printf("  -h, --help                   显示帮助信息\n\n");
     
@@ -636,13 +638,15 @@ static void print_usage(const char *program_name) {
     printf("  • 比对表结构（CREATE TABLE语句）\n"); 
     printf("  • 比对数据内容（行数和校验和）\n");
     printf("  • 支持忽略特定表或字段\n");
-    printf("  • 提供详细的差异报告\n\n");
+    printf("  • 提供详细的差异报告\n");
+    printf("  • 支持加密数据库比较\n\n");
     
     printf("示例:\n");
     printf("  %s db1.db db2.db                     # 比对两个标准数据库\n", program_name);
     printf("  %s db1.ccvfs db2.db                  # 比对压缩数据库和标准数据库\n", program_name);
     printf("  %s -s db1.db db2.db                  # 只比对表结构\n", program_name);
     printf("  %s -t temp,log db1.db db2.db         # 忽略temp和log表\n", program_name);
+    printf("  %s -k 0123456789ABCDEF original.db encrypted.db  # 比对原始和加密数据库\n", program_name);
     printf("  %s -v db1.db db2.db                  # 详细输出\n", program_name);
 }
 

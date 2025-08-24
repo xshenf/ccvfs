@@ -695,9 +695,12 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
     // Encrypt if needed
     unsigned char *encryptedData = NULL;
     if (pFile->pOwner->pEncryptAlg) {
-        encryptedData = sqlite3_malloc(compressedSize + 16); // 为加密添加填充
+        // AES-CBC需要额外空间用于IV和padding (最多15字节padding)
+        // Allocate enough space for IV (16 bytes) + data + max padding (16 bytes)
+        uint32_t encryptedBufferSize = compressedSize + 16 + 16; // IV + data + max padding
+        encryptedData = sqlite3_malloc(encryptedBufferSize);
         if (!encryptedData) {
-            CCVFS_ERROR("Failed to allocate memory for encryption");
+            CCVFS_ERROR("Failed to allocate memory for encryption buffer (need %u bytes)", encryptedBufferSize);
             if (compressedData) sqlite3_free(compressedData);
             return SQLITE_NOMEM;
         }
@@ -709,7 +712,7 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
         
         if (keyLen > 0) {
             int rc = pFile->pOwner->pEncryptAlg->encrypt(key, keyLen, dataToWrite, compressedSize,
-                                                       encryptedData, compressedSize + 16);
+                                                       encryptedData, encryptedBufferSize);
             if (rc > 0) {
                 compressedSize = rc;
                 flags |= CCVFS_PAGE_ENCRYPTED;

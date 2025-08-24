@@ -28,6 +28,7 @@ typedef struct {
     int compare_schema_only;  // Only compare schema, not data
     int verbose;              // Verbose output
     const char *ignore_tables; // Comma-separated list of tables to ignore
+    const char *key_hex;      // Encryption key in hex format for encrypted databases
 } CompareOptions;
 
 // Main function to compare two databases
