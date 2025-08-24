@@ -40,7 +40,6 @@ static int perform_decrypt_decompress_database(const char *encrypted_file, const
 
 // Helper functions
 static int parse_hex_key(const char *hex_str, unsigned char *key, int max_len);
-static int parse_hex_key_for_algorithm(const char *hex_str, unsigned char *key, int max_len, const char *algorithm);
 static void print_hex_key(const unsigned char *key, int len);
 
 // Batch writer test functions
@@ -78,11 +77,11 @@ static void print_usage(const char *program_name) {
     printf("通用选项:\n");
     printf("  -h, --help                       显示帮助信息\n");
     printf("  -v, --verbose                    详细输出\n");
-    printf("  -k, --key <密钥>                  加密密钥（十六进制格式，位数不足时自动补0）\n\n");
+    printf("  -k, --key <密钥>                  加密密钥（十六进制格式）\n\n");
 
     printf("压缩/解压选项:\n");
     printf("  -c, --compress-algo <算法>       压缩算法 (rle, lz4, zlib)\n");
-    printf("  -e, --encrypt-algo <算法>        加密算法 (xor, aes128, aes256, chacha20, 默认: aes256)\n");
+    printf("  -e, --encrypt-algo <算法>        加密算法 (xor, aes128, aes256, chacha20)\n");
     printf("  -l, --level <等级>               压缩等级 (1-9, 默认: 6)\n");
     printf("  -b, --page-size <大小>          页大小 (1K, 4K, 8K, 16K, 32K, 64K, 128K, 256K, 512K, 1M, 默认: 64K)\n\n");
 
@@ -123,11 +122,10 @@ static void print_usage(const char *program_name) {
     printf("  %s compress -b 4K test.db test.ccvfs          # 使用4KB页大小\n", program_name);
     printf("  %s compress -b 1M -c zlib test.db test.ccvfs  # 使用1MB页大小\n", program_name);
     printf("  %s decompress test.ccvfs restored.db\n", program_name);
-    printf("  %s encrypt -k 123456 test.db encrypted.db     # 默认使用aes256加密\n", program_name);
-    printf("  %s encrypt -e aes128 -k ABCDEF test.db encrypted.db\n", program_name);
-    printf("  %s decrypt -k 123456 encrypted.db decrypted.db\n", program_name);
-    printf("  %s compress-encrypt -c zlib -k 123456 test.db secure.ccvfs  # 默认aes256\n", program_name);
-    printf("  %s decrypt-decompress -k 123456 secure.ccvfs restored.db\n", program_name);
+    printf("  %s encrypt -e aes256 -k 0123456789ABCDEF test.db encrypted.db\n", program_name);
+    printf("  %s decrypt -k 0123456789ABCDEF encrypted.db decrypted.db\n", program_name);
+    printf("  %s compress-encrypt -c zlib -e aes256 -k 0123456789ABCDEF test.db secure.ccvfs\n", program_name);
+    printf("  %s decrypt-decompress -k 0123456789ABCDEF secure.ccvfs restored.db\n", program_name);
     printf("  %s info test.ccvfs\n", program_name);
     printf("  %s generate test.db 100MB                     # 生成100MB测试数据库\n", program_name);
     printf("  %s generate -C -E aes128 test.ccvfs 500MB    # 生成500MB压缩加密数据库\n", program_name);
@@ -492,6 +490,11 @@ int main(int argc, char *argv[]) {
         const char *source_db = argv[optind + 1];
         const char *encrypted_db = argv[optind + 2];
 
+        if (!encrypt_algo) {
+            fprintf(stderr, "错误: encrypt 操作需要指定加密算法 (-e 参数)\n");
+            return 1;
+        }
+
         if (!key_hex) {
             fprintf(stderr, "错误: encrypt 操作需要指定密钥 (-k 参数)\n");
             return 1;
@@ -523,6 +526,11 @@ int main(int argc, char *argv[]) {
 
         const char *source_db = argv[optind + 1];
         const char *target_db = argv[optind + 2];
+
+        if (!encrypt_algo) {
+            fprintf(stderr, "错误: compress-encrypt 操作需要指定加密算法 (-e 参数)\n");
+            return 1;
+        }
 
         if (!key_hex) {
             fprintf(stderr, "错误: compress-encrypt 操作需要指定密钥 (-k 参数)\n");
@@ -904,11 +912,6 @@ static int perform_database_compare(const char *db1_path, const char *db2_path, 
 
 // Parse hexadecimal key string to binary
 static int parse_hex_key(const char *hex_str, unsigned char *key, int max_len) {
-    return parse_hex_key_for_algorithm(hex_str, key, max_len, NULL);
-}
-
-// Parse hexadecimal key string to binary with algorithm-specific padding
-static int parse_hex_key_for_algorithm(const char *hex_str, unsigned char *key, int max_len, const char *algorithm) {
     if (!hex_str || !key) return -1;
     
     int hex_len = strlen(hex_str);
@@ -923,7 +926,6 @@ static int parse_hex_key_for_algorithm(const char *hex_str, unsigned char *key, 
         return -1;
     }
     
-    // Parse hex string to binary
     for (int i = 0; i < key_len; i++) {
         unsigned int byte;
         if (sscanf(hex_str + i * 2, "%2x", &byte) != 1) {
@@ -932,35 +934,6 @@ static int parse_hex_key_for_algorithm(const char *hex_str, unsigned char *key, 
             return -1;
         }
         key[i] = (unsigned char) byte;
-    }
-    
-    // Determine target length based on algorithm
-    int target_len = key_len;
-    if (algorithm) {
-        if (strcmp(algorithm, "aes256") == 0) {
-            target_len = (key_len < 32) ? 32 : key_len;
-        } else if (strcmp(algorithm, "aes128") == 0) {
-            target_len = (key_len < 16) ? 16 : key_len;
-        } else {
-            // For other algorithms, pad to 16 bytes minimum
-            target_len = (key_len < 16) ? 16 : key_len;
-        }
-    } else {
-        // Default behavior: pad to 16 bytes minimum
-        if (key_len < 16) {
-            target_len = 16;
-        } else if (key_len < 32 && key_len > 16) {
-            target_len = 32;
-        }
-    }
-    
-    // Pad with zeros if needed
-    if (target_len > key_len && target_len <= max_len) {
-        memset(key + key_len, 0, target_len - key_len);
-        if (key_len < target_len) {
-            printf("提示: 密钥长度不足，已自动补0: %d 字节 -> %d 字节\n", key_len, target_len);
-        }
-        return target_len;
     }
     
     return key_len;
@@ -975,16 +948,8 @@ static void print_hex_key(const unsigned char *key, int len) {
 
 static int perform_encrypt_database(const char *source_db, const char *encrypted_db, 
                                   const char *encrypt_algo, const char *key_hex, int verbose) {
-    // Use default encryption algorithm if not specified
-    if (!encrypt_algo) {
-        encrypt_algo = "aes256";
-        if (verbose) {
-            printf("提示: 未指定加密算法，使用默认值: %s\n", encrypt_algo);
-        }
-    }
-    
     unsigned char key[64];
-    int key_len = parse_hex_key_for_algorithm(key_hex, key, sizeof(key), encrypt_algo);
+    int key_len = parse_hex_key(key_hex, key, sizeof(key));
     if (key_len <= 0) {
         fprintf(stderr, "错误: 无效的密钥格式\n");
         return 1;
@@ -1081,16 +1046,8 @@ static int perform_compress_encrypt_database(const char *source_db, const char *
                                            const char *compress_algo, const char *encrypt_algo,
                                            const char *key_hex, uint32_t page_size, 
                                            int compression_level, int verbose) {
-    // Use default encryption algorithm if not specified
-    if (!encrypt_algo) {
-        encrypt_algo = "aes256";
-        if (verbose) {
-            printf("提示: 未指定加密算法，使用默认值: %s\n", encrypt_algo);
-        }
-    }
-    
     unsigned char key[64];
-    int key_len = parse_hex_key_for_algorithm(key_hex, key, sizeof(key), encrypt_algo);
+    int key_len = parse_hex_key(key_hex, key, sizeof(key));
     if (key_len <= 0) {
         fprintf(stderr, "错误: 无效的密钥格式\n");
         return 1;
