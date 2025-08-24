@@ -841,3 +841,97 @@ cleanup:
     
     return rc;
 }
+
+/*
+ * Compress an existing SQLite database with encryption key
+ */
+int sqlite3_ccvfs_compress_database_with_key(
+    const char *source_db,
+    const char *compressed_db,
+    const char *compress_algorithm,
+    const char *encrypt_algorithm,
+    uint32_t page_size,
+    int compression_level,
+    const unsigned char *key,
+    int keyLen
+) {
+    sqlite3 *source = NULL;
+    sqlite3 *target = NULL;
+    int rc = SQLITE_OK;
+    
+    // Map string algorithms to algorithm pointers
+    const CompressAlgorithm *pCompressAlg = NULL;
+    const EncryptAlgorithm *pEncryptAlg = NULL;
+    
+    if (compress_algorithm && strcmp(compress_algorithm, "zlib") == 0) {
+#ifdef HAVE_ZLIB
+        pCompressAlg = CCVFS_COMPRESS_ZLIB;
+#endif
+    }
+    
+    if (encrypt_algorithm) {
+        if (strcmp(encrypt_algorithm, "aes128") == 0) {
+#ifdef HAVE_OPENSSL
+            pEncryptAlg = CCVFS_ENCRYPT_AES128;
+#endif
+        } else if (strcmp(encrypt_algorithm, "aes256") == 0) {
+#ifdef HAVE_OPENSSL
+            pEncryptAlg = CCVFS_ENCRYPT_AES256;
+#endif
+        }
+    }
+    
+    // Create CCVFS for compression with key
+    // First try to destroy if it already exists
+    sqlite3_ccvfs_destroy("compress_vfs_custom");
+    
+    rc = sqlite3_ccvfs_create_with_key("compress_vfs_custom", NULL, 
+                                      pCompressAlg, pEncryptAlg, 
+                                      page_size, CCVFS_CREATE_OFFLINE,
+                                      key, keyLen);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+    
+    // Call the existing compression logic but handle VFS creation ourselves
+    // Since we've already created the VFS with the key, we need to avoid double creation
+    
+    // Open source database in read-only mode
+    rc = sqlite3_open_v2(source_db, &source, SQLITE_OPEN_READONLY, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_ccvfs_destroy("compress_vfs_custom");
+        return rc;
+    }
+    
+    // Create and open target database with custom CCVFS
+    rc = sqlite3_open_v2(compressed_db, &target, 
+                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 
+                         "compress_vfs_custom");
+    if (rc != SQLITE_OK) {
+        sqlite3_close(source);
+        sqlite3_ccvfs_destroy("compress_vfs_custom");
+        return rc;
+    }
+    
+    // Use SQLite backup API for efficient copying
+    sqlite3_backup *backup = sqlite3_backup_init(target, "main", source, "main");
+    if (!backup) {
+        sqlite3_close(source);
+        sqlite3_close(target);
+        sqlite3_ccvfs_destroy("compress_vfs_custom");
+        return SQLITE_ERROR;
+    }
+    
+    // Copy all pages
+    do {
+        rc = sqlite3_backup_step(backup, -1);  // Copy all pages at once
+    } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+    
+    sqlite3_backup_finish(backup);
+    sqlite3_close(source);
+    sqlite3_close(target);
+    
+    sqlite3_ccvfs_destroy("compress_vfs_custom");
+    
+    return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
+}

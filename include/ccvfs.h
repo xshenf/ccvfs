@@ -141,6 +141,21 @@ int sqlite3_ccvfs_create(
 );
 
 /*
+ * Create CCVFS with encryption key - 推荐用于加密场景
+ * This is a convenience function that creates VFS and sets key in one call
+ */
+int sqlite3_ccvfs_create_with_key(
+    const char *zVfsName,
+    sqlite3_vfs *pRootVfs,
+    const CompressAlgorithm *pCompressAlg,
+    const EncryptAlgorithm *pEncryptAlg,
+    uint32_t pageSize,
+    uint32_t flags,
+    const unsigned char *key,
+    int keyLen
+);
+
+/*
  * Destroy compression and encryption VFS module
  */
 int sqlite3_ccvfs_destroy(const char *zVfsName);
@@ -149,37 +164,6 @@ int sqlite3_ccvfs_destroy(const char *zVfsName);
  * Activate compression and encryption VFS, similar to sqlite3_activate_cerod
  */
 int sqlite3_activate_ccvfs(const CompressAlgorithm *pCompressAlg, const EncryptAlgorithm *pEncryptAlg);
-
-/*
- * Compress an existing SQLite database (offline compression)
- */
-int sqlite3_ccvfs_compress_database(
-    const char *source_db,
-    const char *compressed_db,
-    const char *compress_algorithm,
-    const char *encrypt_algorithm,
-    int compression_level
-);
-
-/*
- * Compress an existing SQLite database with custom page size
- */
-int sqlite3_ccvfs_compress_database_with_page_size(
-    const char *source_db,
-    const char *compressed_db,
-    const char *compress_algorithm,
-    const char *encrypt_algorithm,
-    uint32_t page_size,
-    int compression_level
-);
-
-/*
- * Decompress a compressed database to standard SQLite format
- */
-int sqlite3_ccvfs_decompress_database(
-    const char *compressed_db,
-    const char *output_db
-);
 
 /*
  * Get compression statistics for a compressed database
@@ -246,12 +230,106 @@ int sqlite3_ccvfs_get_buffer_stats(
 int sqlite3_ccvfs_flush_write_buffer(sqlite3 *db);
 
 /*
- * 全局密钥管理函数
- * Set and get encryption key for CCVFS
+ * VFS级别密钥管理函数
+ * VFS-level key management functions
  */
-void ccvfs_set_encryption_key(const unsigned char *key, int keyLen);
+int sqlite3_ccvfs_set_key(const char *zVfsName, const unsigned char *key, int keyLen);
+int sqlite3_ccvfs_get_key(const char *zVfsName, unsigned char *key, int maxLen);
+int sqlite3_ccvfs_clear_key(const char *zVfsName);
 
-int ccvfs_get_encryption_key(unsigned char *key, int maxLen);
+/*
+ * 通过VFS执行压缩和加密操作
+ * Perform compression and encryption operations through VFS
+ * 
+ * 这些函数使用指定VFS绑定的压缩和加密算法来处理数据库
+ * These functions use the compression and encryption algorithms bound to the specified VFS
+ */
+
+/*
+ * 使用指定VFS执行数据库压缩加密操作
+ * Compress and encrypt database using specified VFS
+ * Parameters:
+ *   zVfsName - VFS name (must be created first with sqlite3_ccvfs_create*)
+ *   source_db - Source database file path
+ *   target_db - Target compressed/encrypted database file path
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_compress_encrypt(
+    const char *zVfsName,
+    const char *source_db,
+    const char *target_db
+);
+
+/*
+ * 使用指定VFS执行数据库解压解密操作
+ * Decompress and decrypt database using specified VFS
+ * Parameters:
+ *   zVfsName - VFS name (must be created first with sqlite3_ccvfs_create*)
+ *   source_db - Source compressed/encrypted database file path
+ *   target_db - Target decompressed/decrypted database file path
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_decompress_decrypt(
+    const char *zVfsName,
+    const char *source_db,
+    const char *target_db
+);
+
+/*
+ * 便利函数：创建VFS并执行压缩加密操作
+ * Convenience function: Create VFS and perform compression/encryption
+ * Parameters:
+ *   zVfsName - VFS name to create
+ *   pCompressAlg - Compression algorithm (NULL for no compression)
+ *   pEncryptAlg - Encryption algorithm (NULL for no encryption)
+ *   source_db - Source database file path
+ *   target_db - Target compressed/encrypted database file path
+ *   key - Encryption key (can be NULL if no encryption)
+ *   keyLen - Key length
+ *   pageSize - Page size (0 for default)
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_create_and_compress_encrypt(
+    const char *zVfsName,
+    const CompressAlgorithm *pCompressAlg,
+    const EncryptAlgorithm *pEncryptAlg,
+    const char *source_db,
+    const char *target_db,
+    const unsigned char *key,
+    int keyLen,
+    uint32_t pageSize
+);
+
+/*
+ * 便利函数：创建VFS并执行解压解密操作
+ * Convenience function: Create VFS and perform decompression/decryption
+ * Parameters:
+ *   zVfsName - VFS name to create
+ *   pCompressAlg - Compression algorithm (NULL for no compression)
+ *   pEncryptAlg - Encryption algorithm (NULL for no encryption)
+ *   source_db - Source compressed/encrypted database file path
+ *   target_db - Target decompressed/decrypted database file path
+ *   key - Decryption key (can be NULL if no encryption)
+ *   keyLen - Key length
+ * Return value:
+ *   SQLITE_OK - Success
+ *   Other values - Error code
+ */
+int sqlite3_ccvfs_create_and_decompress_decrypt(
+    const char *zVfsName,
+    const CompressAlgorithm *pCompressAlg,
+    const EncryptAlgorithm *pEncryptAlg,
+    const char *source_db,
+    const char *target_db,
+    const unsigned char *key,
+    int keyLen
+);
 
 #ifdef __cplusplus
 }  /* extern "C" */

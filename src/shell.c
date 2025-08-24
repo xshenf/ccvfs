@@ -141,8 +141,8 @@ void sqlite3_activate_cerod(const char *zParms) {
         
         printf("CCVFS: Parsed %d bytes from hex string\n", keyLen);
         
-        /* 设置全局加密密钥 */
-        ccvfs_set_encryption_key(keyBytes, keyLen);
+        /* 为激活的CCVFS设置加密密钥 */
+        /* 注意：激活函数会创建名为"ccvfs"的VFS实例 */
         
         /* 如果提供了密钥，尝试使用加密算法 */
 #ifdef HAVE_OPENSSL
@@ -166,6 +166,16 @@ void sqlite3_activate_cerod(const char *zParms) {
                pCompressAlg ? pCompressAlg->name : "none",
                pEncryptAlg ? pEncryptAlg->name : "none",
                activation_count);
+               
+        /* 如果提供了密钥，为激活的CCVFS设置密钥 */
+        if (keyLen > 0) {
+            int key_rc = sqlite3_ccvfs_set_key("ccvfs", keyBytes, keyLen);
+            if (key_rc == SQLITE_OK) {
+                printf("CCVFS: Successfully set %d-byte encryption key\n", keyLen);
+            } else {
+                printf("CCVFS: Failed to set encryption key (error %d)\n", key_rc);
+            }
+        }
     } else {
         printf("CCVFS: Activation failed with error code %d\n", rc);
         /* 提供更详细的错误信息 */

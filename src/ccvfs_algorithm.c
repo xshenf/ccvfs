@@ -250,17 +250,16 @@ static int aes128_encrypt(const unsigned char *key, int key_len,
     // 密钥长度自动补全到16字节（重复填充）
     // Automatically expand key to 16 bytes using repetitive padding
     unsigned char expanded_key[16];
+    memset(expanded_key, 0, sizeof(expanded_key)); // 清零以确保干净的状态
+    
     if (key_len == 16) {
         // 已经是16字节，直接使用
         memcpy(expanded_key, key, 16);
         CCVFS_DEBUG("Using provided 16-byte key for AES-128");
     } else if (key_len < 16) {
         // 不足16字节，重复填充
-        int pos = 0;
-        while (pos < 16) {
-            int copy_len = (16 - pos > key_len) ? key_len : (16 - pos);
-            memcpy(expanded_key + pos, key, copy_len);
-            pos += copy_len;
+        for (int i = 0; i < 16; i++) {
+            expanded_key[i] = key[i % key_len];
         }
         CCVFS_DEBUG("Expanded %d-byte key to 16 bytes using repetitive padding", key_len);
     } else {
@@ -333,17 +332,16 @@ static int aes128_decrypt(const unsigned char *key, int key_len,
     // 密钥长度自动补全到16字节（重复填充）
     // Automatically expand key to 16 bytes using repetitive padding
     unsigned char expanded_key[16];
+    memset(expanded_key, 0, sizeof(expanded_key)); // 清零以确保干净的状态
+    
     if (key_len == 16) {
         // 已经是16字节，直接使用
         memcpy(expanded_key, key, 16);
         CCVFS_DEBUG("Using provided 16-byte key for AES-128");
     } else if (key_len < 16) {
         // 不足16字节，重复填充
-        int pos = 0;
-        while (pos < 16) {
-            int copy_len = (16 - pos > key_len) ? key_len : (16 - pos);
-            memcpy(expanded_key + pos, key, copy_len);
-            pos += copy_len;
+        for (int i = 0; i < 16; i++) {
+            expanded_key[i] = key[i % key_len];
         }
         CCVFS_DEBUG("Expanded %d-byte key to 16 bytes using repetitive padding", key_len);
     } else {
@@ -357,6 +355,13 @@ static int aes128_decrypt(const unsigned char *key, int key_len,
         return -1;
     }
     
+    // 验证密文长度：必须是16字节的倍数（除了IV）
+    int ciphertext_len = input_len - 16;
+    if (ciphertext_len % 16 != 0) {
+        CCVFS_ERROR("Invalid ciphertext length: %d (should be multiple of 16)", ciphertext_len);
+        return -1;
+    }
+    
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     if (!ctx) {
         CCVFS_ERROR("Failed to create EVP context");
@@ -366,7 +371,6 @@ static int aes128_decrypt(const unsigned char *key, int key_len,
     // 从输入中提取IV
     const unsigned char *iv = input;
     const unsigned char *ciphertext = input + 16;
-    int ciphertext_len = input_len - 16;
     
     if (EVP_DecryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, expanded_key, iv) != 1) {
         CCVFS_ERROR("Failed to initialize AES-128 decryption");
@@ -383,7 +387,20 @@ static int aes128_decrypt(const unsigned char *key, int key_len,
     plaintext_len = len;
     
     if (EVP_DecryptFinal_ex(ctx, output + len, &len) != 1) {
-        CCVFS_ERROR("Failed to finalize decryption");
+        unsigned long err = ERR_get_error();
+        char err_buf[256];
+        ERR_error_string_n(err, err_buf, sizeof(err_buf));
+        CCVFS_ERROR("Failed to finalize AES-128 decryption: %s (OpenSSL error: %lu)", err_buf, err);
+        CCVFS_ERROR("Decrypt debug: input_len=%d, ciphertext_len=%d, plaintext_len_so_far=%d", 
+                   input_len, ciphertext_len, plaintext_len);
+        
+        // 打印一些数据用于调试
+        CCVFS_ERROR("IV (first 8 bytes): %02X%02X%02X%02X%02X%02X%02X%02X",
+                   iv[0], iv[1], iv[2], iv[3], iv[4], iv[5], iv[6], iv[7]);
+        CCVFS_ERROR("Expanded key (first 8 bytes): %02X%02X%02X%02X%02X%02X%02X%02X",
+                   expanded_key[0], expanded_key[1], expanded_key[2], expanded_key[3],
+                   expanded_key[4], expanded_key[5], expanded_key[6], expanded_key[7]);
+        
         EVP_CIPHER_CTX_free(ctx);
         return -1;
     }

@@ -5,36 +5,92 @@
 
 #include "ccvfs_io.h"
 
-/* 全局变量存储解析后的密钥 */
-static unsigned char g_encryption_key[32];  /* 支持最大32字节密钥 */
-static int g_key_length = 0;
-static int g_key_set = 0;
+// ============================================================================
+// VFS级别密钥管理函数 - 推荐使用
+// VFS-level key management functions - Recommended
+// ============================================================================
 
 /*
-** 设置全局加密密钥
+** 为指定VFS设置加密密钥
 */
-void ccvfs_set_encryption_key(const unsigned char *key, int keyLen) {
-    if (key && keyLen > 0 && keyLen <= sizeof(g_encryption_key)) {
-        memcpy(g_encryption_key, key, keyLen);
-        g_key_length = keyLen;
-        g_key_set = 1;
+int sqlite3_ccvfs_set_key(const char *zVfsName, const unsigned char *key, int keyLen) {
+    sqlite3_vfs *pVfs;
+    CCVFS *pCcvfs;
+    
+    if (!zVfsName) {
+        return SQLITE_ERROR;
+    }
+    
+    pVfs = sqlite3_vfs_find(zVfsName);
+    if (!pVfs) {
+        return SQLITE_ERROR;
+    }
+    
+    pCcvfs = (CCVFS*)pVfs;
+    
+    if (key && keyLen > 0 && keyLen <= sizeof(pCcvfs->encryption_key)) {
+        memcpy(pCcvfs->encryption_key, key, keyLen);
+        pCcvfs->key_length = keyLen;
+        pCcvfs->key_set = 1;
+        return SQLITE_OK;
     } else {
-        g_key_set = 0;
-        g_key_length = 0;
+        pCcvfs->key_set = 0;
+        pCcvfs->key_length = 0;
+        memset(pCcvfs->encryption_key, 0, sizeof(pCcvfs->encryption_key));
+        return SQLITE_ERROR;
     }
 }
 
 /*
-** 获取全局加密密钥
+** 从指定VFS获取加密密钥
 */
-int ccvfs_get_encryption_key(unsigned char *key, int maxLen) {
-    if (!g_key_set || !key) {
+int sqlite3_ccvfs_get_key(const char *zVfsName, unsigned char *key, int maxLen) {
+    sqlite3_vfs *pVfs;
+    CCVFS *pCcvfs;
+    
+    if (!zVfsName || !key) {
         return 0;
     }
-
-    int copyLen = (g_key_length > maxLen) ? maxLen : g_key_length;
-    memcpy(key, g_encryption_key, copyLen);
+    
+    pVfs = sqlite3_vfs_find(zVfsName);
+    if (!pVfs) {
+        return 0;
+    }
+    
+    pCcvfs = (CCVFS*)pVfs;
+    
+    if (!pCcvfs->key_set) {
+        return 0;
+    }
+    
+    int copyLen = (pCcvfs->key_length > maxLen) ? maxLen : pCcvfs->key_length;
+    memcpy(key, pCcvfs->encryption_key, copyLen);
     return copyLen;
+}
+
+/*
+** 清除指定VFS的加密密钥
+*/
+int sqlite3_ccvfs_clear_key(const char *zVfsName) {
+    sqlite3_vfs *pVfs;
+    CCVFS *pCcvfs;
+    
+    if (!zVfsName) {
+        return SQLITE_ERROR;
+    }
+    
+    pVfs = sqlite3_vfs_find(zVfsName);
+    if (!pVfs) {
+        return SQLITE_ERROR;
+    }
+    
+    pCcvfs = (CCVFS*)pVfs;
+    
+    pCcvfs->key_set = 0;
+    pCcvfs->key_length = 0;
+    memset(pCcvfs->encryption_key, 0, sizeof(pCcvfs->encryption_key));
+    
+    return SQLITE_OK;
 }
 
 // ============================================================================
@@ -159,6 +215,11 @@ int sqlite3_ccvfs_create(
     pNew->enable_data_recovery = 0;
     pNew->corruption_tolerance = 0;
     
+    // Initialize VFS-level key management
+    pNew->key_set = 0;
+    pNew->key_length = 0;
+    memset(pNew->encryption_key, 0, sizeof(pNew->encryption_key));
+    
     // Directly assign algorithm pointers (much more efficient!)
     pNew->pCompressAlg = (CompressAlgorithm*)pCompressAlg;
     pNew->pEncryptAlg = (EncryptAlgorithm*)pEncryptAlg;
@@ -180,6 +241,40 @@ int sqlite3_ccvfs_create(
     }
     
     CCVFS_INFO("Successfully created CCVFS: %s", zVfsName);
+    return SQLITE_OK;
+}
+
+/*
+ * Create CCVFS with encryption key - convenience function
+ */
+int sqlite3_ccvfs_create_with_key(
+    const char *zVfsName,
+    sqlite3_vfs *pRootVfs,
+    const CompressAlgorithm *pCompressAlg,
+    const EncryptAlgorithm *pEncryptAlg,
+    uint32_t pageSize,
+    uint32_t flags,
+    const unsigned char *key,
+    int keyLen
+) {
+    int rc;
+    
+    // First create the VFS
+    rc = sqlite3_ccvfs_create(zVfsName, pRootVfs, pCompressAlg, pEncryptAlg, pageSize, flags);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+    
+    // Then set the key if provided
+    if (key && keyLen > 0) {
+        rc = sqlite3_ccvfs_set_key(zVfsName, key, keyLen);
+        if (rc != SQLITE_OK) {
+            // If key setting fails, clean up the VFS
+            sqlite3_ccvfs_destroy(zVfsName);
+            return rc;
+        }
+    }
+    
     return SQLITE_OK;
 }
 
@@ -385,4 +480,248 @@ int sqlite3_activate_ccvfs(const CompressAlgorithm *pCompressAlg, const EncryptA
         CCVFS_ERROR("Cannot find the newly created CCVFS");
         return SQLITE_ERROR;
     }
+}
+
+// ============================================================================
+// 新的压缩加密和解压解密接口实现
+// New compression/encryption and decompression/decryption interface implementation
+// ============================================================================
+
+/*
+ * 使用指定VFS执行数据库压缩加密操作
+ * Compress and encrypt database using specified VFS
+ */
+int sqlite3_ccvfs_compress_encrypt(
+    const char *zVfsName,
+    const char *source_db,
+    const char *target_db
+) {
+    sqlite3 *source = NULL;
+    sqlite3 *target = NULL;
+    int rc = SQLITE_OK;
+    
+    if (!zVfsName || !source_db || !target_db) {
+        CCVFS_ERROR("参数不能为NULL");
+        return SQLITE_MISUSE;
+    }
+    
+    CCVFS_INFO("开始执行压缩加密操作: VFS=%s, source=%s, target=%s", 
+              zVfsName, source_db, target_db);
+    
+    // 验证VFS是否存在
+    sqlite3_vfs *pVfs = sqlite3_vfs_find(zVfsName);
+    if (!pVfs) {
+        CCVFS_ERROR("VFS不存在: %s", zVfsName);
+        return SQLITE_ERROR;
+    }
+    
+    // 打开源数据库（只读模式）
+    rc = sqlite3_open_v2(source_db, &source, SQLITE_OPEN_READONLY, NULL);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("打开源数据库失败: %s", sqlite3_errmsg(source));
+        return rc;
+    }
+    
+    // 使用指定VFS创建目标数据库
+    rc = sqlite3_open_v2(target_db, &target, 
+                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 
+                         zVfsName);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("创建目标数据库失败: %s", sqlite3_errmsg(target));
+        sqlite3_close(source);
+        return rc;
+    }
+    
+    // 使用SQLite备份API进行高效复制
+    sqlite3_backup *backup = sqlite3_backup_init(target, "main", source, "main");
+    if (!backup) {
+        CCVFS_ERROR("初始化备份失败");
+        sqlite3_close(source);
+        sqlite3_close(target);
+        return SQLITE_ERROR;
+    }
+    
+    CCVFS_INFO("正在压缩加密数据库...");
+    
+    // 复制所有页面
+    do {
+        rc = sqlite3_backup_step(backup, -1);  // 一次性复制所有页面
+    } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+    
+    sqlite3_backup_finish(backup);
+    sqlite3_close(source);
+    sqlite3_close(target);
+    
+    if (rc == SQLITE_DONE) {
+        CCVFS_INFO("数据库压缩加密成功");
+        return SQLITE_OK;
+    } else {
+        CCVFS_ERROR("数据库压缩加密失败: %d", rc);
+        return rc;
+    }
+}
+
+/*
+ * 使用指定VFS执行数据库解压解密操作
+ * Decompress and decrypt database using specified VFS
+ */
+int sqlite3_ccvfs_decompress_decrypt(
+    const char *zVfsName,
+    const char *source_db,
+    const char *target_db
+) {
+    sqlite3 *source = NULL;
+    sqlite3 *target = NULL;
+    int rc = SQLITE_OK;
+    
+    if (!zVfsName || !source_db || !target_db) {
+        CCVFS_ERROR("参数不能为NULL");
+        return SQLITE_MISUSE;
+    }
+    
+    CCVFS_INFO("开始执行解压解密操作: VFS=%s, source=%s, target=%s", 
+              zVfsName, source_db, target_db);
+    
+    // 验证VFS是否存在
+    sqlite3_vfs *pVfs = sqlite3_vfs_find(zVfsName);
+    if (!pVfs) {
+        CCVFS_ERROR("VFS不存在: %s", zVfsName);
+        return SQLITE_ERROR;
+    }
+    
+    // 使用指定VFS打开压缩/加密数据库（只读模式）
+    rc = sqlite3_open_v2(source_db, &source, SQLITE_OPEN_READONLY, zVfsName);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("打开源数据库失败: %s", sqlite3_errmsg(source));
+        return rc;
+    }
+    
+    // 创建标准SQLite数据库
+    rc = sqlite3_open_v2(target_db, &target, 
+                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 
+                         NULL);
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("创建目标数据库失败: %s", sqlite3_errmsg(target));
+        sqlite3_close(source);
+        return rc;
+    }
+    
+    // 使用SQLite备份API进行高效复制
+    sqlite3_backup *backup = sqlite3_backup_init(target, "main", source, "main");
+    if (!backup) {
+        CCVFS_ERROR("初始化备份失败");
+        sqlite3_close(source);
+        sqlite3_close(target);
+        return SQLITE_ERROR;
+    }
+    
+    CCVFS_INFO("正在解压解密数据库...");
+    
+    // 复制所有页面
+    do {
+        rc = sqlite3_backup_step(backup, -1);  // 一次性复制所有页面
+    } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+    
+    sqlite3_backup_finish(backup);
+    sqlite3_close(source);
+    sqlite3_close(target);
+    
+    if (rc == SQLITE_DONE) {
+        CCVFS_INFO("数据库解压解密成功");
+        return SQLITE_OK;
+    } else {
+        CCVFS_ERROR("数据库解压解密失败: %d", rc);
+        return rc;
+    }
+}
+
+/*
+ * 便利函数：创建VFS并执行压缩加密操作
+ * Convenience function: Create VFS and perform compression/encryption
+ */
+int sqlite3_ccvfs_create_and_compress_encrypt(
+    const char *zVfsName,
+    const CompressAlgorithm *pCompressAlg,
+    const EncryptAlgorithm *pEncryptAlg,
+    const char *source_db,
+    const char *target_db,
+    const unsigned char *key,
+    int keyLen,
+    uint32_t pageSize
+) {
+    int rc;
+    
+    CCVFS_INFO("创建VFS并执行压缩加密: VFS=%s", zVfsName);
+    
+    // 先尝试销毁现有VFS（如果存在）
+    sqlite3_ccvfs_destroy(zVfsName);
+    
+    // 创建VFS
+    if (key && keyLen > 0) {
+        // 使用带密钥的创建函数
+        rc = sqlite3_ccvfs_create_with_key(zVfsName, NULL, pCompressAlg, pEncryptAlg, 
+                                          pageSize, CCVFS_CREATE_OFFLINE, key, keyLen);
+    } else {
+        // 普通创建
+        rc = sqlite3_ccvfs_create(zVfsName, NULL, pCompressAlg, pEncryptAlg, 
+                                 pageSize, CCVFS_CREATE_OFFLINE);
+    }
+    
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("创建VFS失败: %d", rc);
+        return rc;
+    }
+    
+    // 执行压缩加密
+    rc = sqlite3_ccvfs_compress_encrypt(zVfsName, source_db, target_db);
+    
+    // 清理VFS
+    sqlite3_ccvfs_destroy(zVfsName);
+    
+    return rc;
+}
+
+/*
+ * 便利函数：创建VFS并执行解压解密操作
+ * Convenience function: Create VFS and perform decompression/decryption
+ */
+int sqlite3_ccvfs_create_and_decompress_decrypt(
+    const char *zVfsName,
+    const CompressAlgorithm *pCompressAlg,
+    const EncryptAlgorithm *pEncryptAlg,
+    const char *source_db,
+    const char *target_db,
+    const unsigned char *key,
+    int keyLen
+) {
+    int rc;
+    
+    CCVFS_INFO("创建VFS并执行解压解密: VFS=%s", zVfsName);
+    
+    // 先尝试销毁现有VFS（如果存在）
+    sqlite3_ccvfs_destroy(zVfsName);
+    
+    // 创建VFS
+    if (key && keyLen > 0) {
+        // 使用带密钥的创建函数
+        rc = sqlite3_ccvfs_create_with_key(zVfsName, NULL, pCompressAlg, pEncryptAlg, 
+                                          0, CCVFS_CREATE_OFFLINE, key, keyLen);
+    } else {
+        // 普通创建
+        rc = sqlite3_ccvfs_create(zVfsName, NULL, pCompressAlg, pEncryptAlg, 
+                                 0, CCVFS_CREATE_OFFLINE);
+    }
+    
+    if (rc != SQLITE_OK) {
+        CCVFS_ERROR("创建VFS失败: %d", rc);
+        return rc;
+    }
+    
+    // 执行解压解密
+    rc = sqlite3_ccvfs_decompress_decrypt(zVfsName, source_db, target_db);
+    
+    // 清理VFS
+    sqlite3_ccvfs_destroy(zVfsName);
+    
+    return rc;
 }

@@ -384,9 +384,10 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "错误: 无效的密钥格式\n");
                 return 1;
             }
-            ccvfs_set_encryption_key(key, key_len);
+            // Note: The compress function will create its own VFS
+            // We'll need to set the key after VFS creation
             if (verbose) {
-                printf("已设置加密密钥: ");
+                printf("已解析加密密钥: ");
                 print_hex_key(key, key_len);
                 printf("\n");
             }
@@ -460,9 +461,10 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "错误: 无效的密钥格式\n");
                 return 1;
             }
-            ccvfs_set_encryption_key(key, key_len);
+            // Note: The decompress function will create its own VFS
+            // We'll need to set the key after VFS creation
             if (verbose) {
-                printf("已设置解密密钥: ");
+                printf("已解析解密密钥: ");
                 print_hex_key(key, key_len);
                 printf("\n");
             }
@@ -883,8 +885,33 @@ static int perform_database_compare(const char *db1_path, const char *db2_path, 
     options.ignore_tables = ignore_tables;
     options.key_hex = key_hex;  // Set encryption key
     
-    // Set decryption key before initializing CCVFS if provided
-    if (key_hex) {
+    // Initialize SQLite and CCVFS
+    sqlite3_initialize();
+    
+    // Register CCVFS for handling compressed databases
+#ifdef HAVE_ZLIB
+    int rc = sqlite3_ccvfs_create("ccvfs", NULL, CCVFS_COMPRESS_ZLIB, 
+#ifdef HAVE_OPENSSL
+                                 CCVFS_ENCRYPT_AES128,  // Include AES encryption support
+#else
+                                 NULL,
+#endif
+                                 0, 0);
+#else
+    int rc = sqlite3_ccvfs_create("ccvfs", NULL, NULL, 
+#ifdef HAVE_OPENSSL
+                                 CCVFS_ENCRYPT_AES128,  // Include AES encryption support
+#else
+                                 NULL,
+#endif
+                                 0, 0);
+#endif
+    if (rc != SQLITE_OK && verbose) {
+        printf("Note: CCVFS registration failed (code %d) - compressed databases may not work\n", rc);
+    }
+    
+    // Set decryption key AFTER creating CCVFS if provided
+    if (key_hex && rc == SQLITE_OK) {
         unsigned char key[64];
         int key_len = 0;
         const char *hex_str = key_hex;
@@ -913,41 +940,20 @@ static int perform_database_compare(const char *db1_path, const char *db2_path, 
             key[i] = (unsigned char)byte_val;
         }
         
-        // Set decryption key globally
-        ccvfs_set_encryption_key(key, key_len);
+        // Set decryption key for CCVFS (now that VFS exists)
+        int key_rc = sqlite3_ccvfs_set_key("ccvfs", key, key_len);
+        if (key_rc != SQLITE_OK) {
+            fprintf(stderr, "错误: 无法为CCVFS设置密钥 (错误代码: %d)\n", key_rc);
+            return 1;
+        }
         
         if (verbose) {
-            printf("已设置解密密钥: ");
+            printf("已为CCVFS设置解密密钥: ");
             for (int i = 0; i < key_len; i++) {
                 printf("%02X", key[i]);
             }
             printf(" (%d 字节)\n\n", key_len);
         }
-    }
-
-    // Initialize SQLite and CCVFS
-    sqlite3_initialize();
-    
-    // Register CCVFS for handling compressed databases
-#ifdef HAVE_ZLIB
-    int rc = sqlite3_ccvfs_create("ccvfs", NULL, CCVFS_COMPRESS_ZLIB, 
-#ifdef HAVE_OPENSSL
-                                 CCVFS_ENCRYPT_AES128,  // Include AES encryption support
-#else
-                                 NULL,
-#endif
-                                 0, 0);
-#else
-    int rc = sqlite3_ccvfs_create("ccvfs", NULL, NULL, 
-#ifdef HAVE_OPENSSL
-                                 CCVFS_ENCRYPT_AES128,  // Include AES encryption support
-#else
-                                 NULL,
-#endif
-                                 0, 0);
-#endif
-    if (rc != SQLITE_OK && verbose) {
-        printf("Note: CCVFS registration failed (code %d) - compressed databases may not work\n", rc);
     }
 
     if (verbose) {
@@ -1027,9 +1033,6 @@ static int perform_encrypt_database(const char *source_db, const char *encrypted
         return 1;
     }
     
-    // Set encryption key globally
-    ccvfs_set_encryption_key(key, key_len);
-    
     // Auto-detect page size from source database
     uint32_t page_size = 0;
     sqlite3 *db = NULL;
@@ -1061,9 +1064,21 @@ static int perform_encrypt_database(const char *source_db, const char *encrypted
         printf("\n\n");
     }
     
-    // Use compress function with no compression but with encryption
-    int rc = sqlite3_ccvfs_compress_database_with_page_size(
-        source_db, encrypted_db, NULL, encrypt_algo, page_size, 0);
+    // 使用新的VFS级别压缩加密API
+    int rc = sqlite3_ccvfs_create_and_compress_encrypt(
+        "encrypt_vfs",
+        NULL,  // 无压缩
+#ifdef HAVE_OPENSSL
+        CCVFS_ENCRYPT_AES128,
+#else
+        NULL,
+#endif
+        source_db,
+        encrypted_db,
+        key,
+        key_len,
+        page_size
+    );
     
     if (rc == SQLITE_OK) {
         printf("\n数据库加密成功!\n");
@@ -1089,9 +1104,6 @@ static int perform_decrypt_database(const char *encrypted_db, const char *output
         return 1;
     }
     
-    // Set decryption key globally
-    ccvfs_set_encryption_key(key, key_len);
-    
     if (verbose) {
         printf("解密参数:\n");
         printf("  加密文件: %s\n", encrypted_db);
@@ -1102,8 +1114,24 @@ static int perform_decrypt_database(const char *encrypted_db, const char *output
         printf("\n\n");
     }
     
-    // Use decompress function which will handle decryption
-    int rc = sqlite3_ccvfs_decompress_database(encrypted_db, output_db);
+    // 使用新的VFS级别解压解密API
+    int rc = sqlite3_ccvfs_create_and_decompress_decrypt(
+        "decrypt_vfs",
+#ifdef HAVE_ZLIB
+        CCVFS_COMPRESS_ZLIB,
+#else
+        NULL,
+#endif
+#ifdef HAVE_OPENSSL
+        CCVFS_ENCRYPT_AES128,
+#else
+        NULL,
+#endif
+        encrypted_db,
+        output_db,
+        key,
+        key_len
+    );
     
     if (rc == SQLITE_OK) {
         printf("\n数据库解密成功!\n");
@@ -1125,8 +1153,8 @@ static int perform_compress_encrypt_database(const char *source_db, const char *
         return 1;
     }
     
-    // Set encryption key globally
-    ccvfs_set_encryption_key(key, key_len);
+    // Set encryption key for compression VFS
+    // (Note: The compress function will create its own VFS instance)
     
     if (verbose) {
         printf("压缩加密参数:\n");
@@ -1171,8 +1199,8 @@ static int perform_decrypt_decompress_database(const char *encrypted_file, const
         return 1;
     }
     
-    // Set decryption key globally
-    ccvfs_set_encryption_key(key, key_len);
+    // Set decryption key for decompress VFS
+    // (Note: The decompress function will create its own VFS instance)
     
     if (verbose) {
         printf("解密解压参数:\n");

@@ -371,12 +371,12 @@ static int readPage(CCVFSFile *pFile, uint32_t pageNum, unsigned char *buffer, u
             return SQLITE_NOMEM;
         }
         
-        // 使用全局设置的加密密钥
-        // Use globally set encryption key
-        unsigned char key[32];
-        int keyLen = ccvfs_get_encryption_key(key, sizeof(key));
-        
-        if (keyLen > 0) {
+        // 使用VFS实例的加密密钥
+        // Use VFS instance encryption key
+        if (pFile->pOwner->key_set && pFile->pOwner->key_length > 0) {
+            unsigned char *key = pFile->pOwner->encryption_key;
+            int keyLen = pFile->pOwner->key_length;
+            
             rc = pFile->pOwner->pEncryptAlg->decrypt(key, keyLen, compressedData, 
                                                    pIndex->compressed_size,
                                                    decryptedData, pIndex->compressed_size);
@@ -388,8 +388,8 @@ static int readPage(CCVFSFile *pFile, uint32_t pageNum, unsigned char *buffer, u
             }
             CCVFS_VERBOSE("Page %u decrypted with %d-byte key", pageNum, keyLen);
             
-            // 清除栈上的密钥副本
-            memset(key, 0, sizeof(key));
+            // 注意：key是指向VFS实例密钥的指针，不能清零
+            // Note: key is a pointer to VFS instance key, should not be cleared
         } else {
             CCVFS_ERROR("No encryption key available for decrypting page %u", pageNum);
             sqlite3_free(compressedData);
@@ -705,12 +705,12 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
             return SQLITE_NOMEM;
         }
         
-        // 使用全局设置的加密密钥
-        // Use globally set encryption key
-        unsigned char key[32];
-        int keyLen = ccvfs_get_encryption_key(key, sizeof(key));
-        
-        if (keyLen > 0) {
+        // 使用VFS实例的加密密钥
+        // Use VFS instance encryption key
+        if (pFile->pOwner->key_set && pFile->pOwner->key_length > 0) {
+            unsigned char *key = pFile->pOwner->encryption_key;
+            int keyLen = pFile->pOwner->key_length;
+            
             int rc = pFile->pOwner->pEncryptAlg->encrypt(key, keyLen, dataToWrite, compressedSize,
                                                        encryptedData, encryptedBufferSize);
             if (rc > 0) {
@@ -724,9 +724,6 @@ static int writePage(CCVFSFile *pFile, uint32_t pageNum, const unsigned char *da
                 if (compressedData) sqlite3_free(compressedData);
                 return SQLITE_IOERR;
             }
-            
-            // 清除栈上的密钥副本
-            memset(key, 0, sizeof(key));
         } else {
             CCVFS_ERROR("No encryption key available for page %u", pageNum);
             sqlite3_free(encryptedData);

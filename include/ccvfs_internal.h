@@ -190,6 +190,12 @@ typedef struct CCVFS {
     uint32_t creation_flags; /* Creation flags */
     uint32_t page_size; /* Page size in bytes (页面大小，对应SQLite页面大小) */
 
+    // VFS级别的密钥管理
+    // VFS-level key management
+    unsigned char encryption_key[64]; /* VFS实例专用加密密钥 VFS instance-specific encryption key */
+    int key_length; /* 密钥长度 Key length */
+    int key_set; /* 密钥是否已设置 Whether key is set */
+
     // 数据完整性和错误处理配置
     // Data integrity and error handling configuration
     int strict_checksum_mode; /* 严格校验和模式：1=严格，0=容错 Strict checksum mode: 1=strict, 0=tolerant */
